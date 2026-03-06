@@ -8,7 +8,9 @@ const tor = require('../src/tor/main');
 const wss = require('ws');
 const net = require('net');
 
-const PRICES_FILE = path.join(__dirname, '..', 'prices.json');
+const PRICES_FILE = process.env.NODE_ENV === 'development'
+  ? path.join(__dirname, '..', 'prices.json')
+  : path.join(path.dirname(app.getPath('exe')), 'prices.json');
 
 // Bracket-match to extract a JSON array after "key": in raw HTML.
 // Handles both plain JSON and Next.js RSC escaped format (\"key\":[...]).
