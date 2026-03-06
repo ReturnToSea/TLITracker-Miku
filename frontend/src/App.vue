@@ -197,26 +197,19 @@ function mapLabel(map) {
 }
 
 // ── Settings ───────────────────────────────────────────────────────────────
-const STORAGE_KEY = 'tli-game-dir'
+const STORAGE_KEY = 'tli-log-path'
 const activeTab = ref('overview')
-const showSettings = ref(false)
-const gameDir = ref(localStorage.getItem(STORAGE_KEY) ?? '')
-const findStatus = ref('')
+const logFilePath = ref(localStorage.getItem(STORAGE_KEY) ?? '')
 
-async function pickDirectory() {
+async function pickLogFile() {
   if (!window.electronAPI) return
-  const dir = await window.electronAPI.openDirectoryDialog()
-  if (!dir) return
-  gameDir.value = dir
-  findStatus.value = 'searching'
-  const found = await window.electronAPI.findLogInDir(dir)
-  if (found) {
-    findStatus.value = 'found'
-    localStorage.setItem(STORAGE_KEY, dir)
-    await startWatching(found)
-  } else {
-    findStatus.value = 'not-found'
-  }
+  const file = await window.electronAPI.openFileDialog()
+  if (!file) return
+  logFilePath.value = file
+  localStorage.setItem(STORAGE_KEY, file)
+  if (state.status !== 'idle') await stopTracking()
+  await startWatching(file)
+  activeTab.value = 'overview'
 }
 
 // ── Electron connection ────────────────────────────────────────────────────
@@ -226,7 +219,6 @@ let profitTimer = null
 async function startWatching(logPath) {
   state.logPath = logPath
   state.status = 'connecting'
-  showSettings.value = false
   await window.electronAPI.startTorLog(logPath)
   await connectWebSocket()
   // Tick every 30s to refresh profitPerMin display
@@ -337,19 +329,11 @@ onMounted(async () => {
     await connectWebSocket()
     return
   }
-  const savedDir = localStorage.getItem(STORAGE_KEY)
-  if (savedDir && window.electronAPI) {
-    findStatus.value = 'searching'
-    const found = await window.electronAPI.findLogInDir(savedDir)
-    if (found) {
-      findStatus.value = 'found'
-      await startWatching(found)
-    } else {
-      findStatus.value = 'not-found'
-      showSettings.value = true
-    }
+  const savedPath = localStorage.getItem(STORAGE_KEY)
+  if (savedPath && window.electronAPI) {
+    await startWatching(savedPath)
   } else {
-    showSettings.value = true
+    activeTab.value = 'settings'
   }
 })
 
@@ -365,7 +349,6 @@ onUnmounted(() => {
     <div class="titlebar" style="-webkit-app-region: drag">
       <span class="titlebar-title">TLI Tracker</span>
       <div class="titlebar-controls" style="-webkit-app-region: no-drag">
-        <button class="tb-btn" @click="showSettings = !showSettings" title="Settings">⚙</button>
         <button class="tb-btn" @click="minimizeWindow">─</button>
         <button class="tb-btn tb-btn--close" @click="closeWindow">✕</button>
       </div>
@@ -378,45 +361,26 @@ onUnmounted(() => {
       <div class="sidebar">
         <button
           class="tab-btn"
-          :class="{ active: activeTab === 'overview' && !showSettings }"
-          @click="activeTab = 'overview'; showSettings = false"
+          :class="{ active: activeTab === 'overview' }"
+          @click="activeTab = 'overview'"
         >Overview</button>
         <button
           class="tab-btn"
-          :class="{ active: activeTab === 'pricing' && !showSettings }"
-          @click="activeTab = 'pricing'; showSettings = false"
+          :class="{ active: activeTab === 'pricing' }"
+          @click="activeTab = 'pricing'"
         >Pricing</button>
+        <button
+          class="tab-btn"
+          :class="{ active: activeTab === 'settings' }"
+          @click="activeTab = 'settings'"
+        >Settings</button>
       </div>
 
       <!-- Main content -->
       <div class="main">
 
-        <!-- Settings overlay -->
-        <div v-if="showSettings" class="panel center-panel">
-          <h2>Settings</h2>
-          <p class="hint">
-            Select your <strong>Torchlight Infinite</strong> game folder.<br>
-            The tracker will automatically find <code>UE_game.log</code> inside it.
-          </p>
-          <button class="btn btn--primary" @click="pickDirectory">
-            {{ gameDir ? 'Change Game Folder' : 'Select Game Folder' }}
-          </button>
-          <p v-if="gameDir" class="small-path">{{ gameDir }}</p>
-          <p v-if="findStatus === 'searching'" class="find-msg">Searching…</p>
-          <p v-else-if="findStatus === 'not-found'" class="find-msg find-msg--error">
-            Could not find <code>UE_game.log</code>.<br>
-            Make sure <strong>Logging</strong> is enabled in TLI settings and try again.
-          </p>
-          <button
-            v-if="state.logPath"
-            class="btn btn--small"
-            style="margin-top: 8px"
-            @click="showSettings = false"
-          >Back</button>
-        </div>
-
         <!-- Overview tab -->
-        <div v-else-if="activeTab === 'overview'" class="panel">
+        <div v-if="activeTab === 'overview'" class="panel">
 
           <!-- Top stats -->
           <div class="stats-row">
@@ -445,7 +409,7 @@ onUnmounted(() => {
               Waiting for log data — make sure <strong>Logging</strong> is enabled in TLI settings
             </span>
             <span v-else>Not connected —
-              <button class="link-btn" @click="showSettings = true">select game folder</button>
+              <button class="link-btn" @click="activeTab = 'settings'">select log file</button>
             </span>
           </div>
 
@@ -476,6 +440,25 @@ onUnmounted(() => {
             </div>
           </div>
 
+        </div>
+
+        <!-- Settings tab -->
+        <div v-else-if="activeTab === 'settings'" class="panel center-panel">
+          <h2>Settings</h2>
+          <p class="hint">
+            Select your <strong>UE_game.log</strong> file directly.<br>
+            Make sure <strong>Logging</strong> is enabled in TLI settings first.
+          </p>
+          <button class="btn btn--primary" @click="pickLogFile">
+            {{ logFilePath ? 'Change Log File' : 'Select Log File' }}
+          </button>
+          <p v-if="logFilePath" class="small-path">{{ logFilePath }}</p>
+          <button
+            v-if="state.logPath"
+            class="btn btn--small"
+            style="margin-top: 8px"
+            @click="activeTab = 'overview'"
+          >Back</button>
         </div>
 
         <!-- Pricing tab -->
