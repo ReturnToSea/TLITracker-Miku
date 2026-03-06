@@ -516,12 +516,14 @@ app.whenReady().then(() => {
 
     const prices = {};
     const names = {};
+    const categories = {};
     for (const item of allItems) {
       const id = item.config_base_id ?? item.configBaseId ?? item.itemId ?? item.id;
       const price = item.price_fe_median ?? item.priceFe ?? item.price_fe ?? item.currentPrice ?? item.price;
       if (id != null && price != null) {
         prices[String(id)] = Number(price);
         if (item.name) names[String(id)] = item.name;
+        if (item.category) categories[String(id)] = item.category;
       }
     }
 
@@ -529,7 +531,7 @@ app.whenReady().then(() => {
       throw new Error('Could not extract prices from data — field names may have changed');
     }
 
-    const result = { prices, names, lastUpdated: Date.now(), count: Object.keys(prices).length };
+    const result = { prices, names, categories, lastUpdated: Date.now(), count: Object.keys(prices).length };
     await fs.writeFile(PRICES_FILE, JSON.stringify(result, null, 2), 'utf-8');
     return result;
   });

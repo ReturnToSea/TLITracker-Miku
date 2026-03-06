@@ -150,6 +150,7 @@ const state = reactive({
   prices: {},            // baseId → price
   basePriceIds: new Set(), // IDs from prices.json — only these get log price updates
   priceNames: {},        // baseId → name (from titrack.ninja)
+  priceCategories: {},   // baseId → category (from titrack.ninja)
   priceLastUpdated: null,
   currentMap: null,      // { areaId, mapId, checkType, startTime, pickups: [] }
   mapHistory: [],
@@ -157,7 +158,18 @@ const state = reactive({
 })
 
 // ── Computed stats ─────────────────────────────────────────────────────────
+const FE_BASE_ID = '100300'
+const SKILL_CATEGORIES = new Set(['Active Skills', 'Support Skills', 'Catalyst Skills', 'Passive Skills'])
+const SKILL_QUALITY_KEYWORDS = ['Magnificent', 'Noble', 'Precise']
+
 function itemValue(baseId, count) {
+  if (baseId === FE_BASE_ID) return count  // FE is always worth 1 FE each
+  // For skills, only price the rare quality variants — base skills have scam/unreliable prices
+  const category = state.priceCategories[baseId]
+  if (category && SKILL_CATEGORIES.has(category)) {
+    const name = state.priceNames[baseId] ?? ''
+    if (!SKILL_QUALITY_KEYWORDS.some(kw => name.includes(kw))) return 0
+  }
   return (state.prices[baseId] ?? 0) * count
 }
 
@@ -200,7 +212,17 @@ const allMaps = computed(() => {
 })
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+const NON_MAP_TYPES = new Set(['MainCity', 'WorldBossChallengeMap', 'BossChallengeMap', 'TeamTdMap'])
+
 function startNewMap(areaId, mapId, checkType) {
+  if (NON_MAP_TYPES.has(checkType)) {
+    // Entering town or non-farm area — finalize current map but don't start a new one
+    if (state.currentMap) {
+      state.mapHistory.push({ ...state.currentMap, endTime: Date.now() })
+      state.currentMap = null
+    }
+    return
+  }
   if (state.currentMap) state.mapHistory.push({ ...state.currentMap, endTime: Date.now() })
   if (!state.sessionStart) state.sessionStart = Date.now()
   state.currentMap = { areaId, mapId, checkType, startTime: Date.now(), pickups: [] }
@@ -400,6 +422,7 @@ async function refreshPrices() {
     state.prices = { ...result.prices }
     state.basePriceIds = new Set(Object.keys(result.prices))
     state.priceNames = result.names ?? {}
+    state.priceCategories = result.categories ?? {}
     state.priceLastUpdated = result.lastUpdated
   } catch (e) {
     pricingError.value = e.message ?? 'Failed to fetch prices'
@@ -420,6 +443,7 @@ onMounted(async () => {
     Object.assign(state.prices, saved.prices)
     state.basePriceIds = new Set(Object.keys(saved.prices))
     state.priceNames = saved.names ?? {}
+    state.priceCategories = saved.categories ?? {}
     state.priceLastUpdated = saved.lastUpdated
   }
 
