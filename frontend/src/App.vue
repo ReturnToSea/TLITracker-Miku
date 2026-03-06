@@ -137,6 +137,36 @@ function updatePrice(data, itemId) {
   }
 }
 
+// ── Settings ───────────────────────────────────────────────────────────────
+const STORAGE_KEY = 'tli-game-dir'
+const showSettings = ref(false)
+const gameDir = ref(localStorage.getItem(STORAGE_KEY) ?? '')
+const findStatus = ref('')   // '', 'searching', 'found', 'not-found'
+
+async function pickDirectory() {
+  if (!window.electronAPI) return
+  const dir = await window.electronAPI.openDirectoryDialog()
+  if (!dir) return
+  gameDir.value = dir
+  findStatus.value = 'searching'
+  const found = await window.electronAPI.findLogInDir(dir)
+  if (found) {
+    findStatus.value = 'found'
+    localStorage.setItem(STORAGE_KEY, dir)
+    await startWatching(found)
+  } else {
+    findStatus.value = 'not-found'
+  }
+}
+
+async function startWatching(logPath) {
+  state.logPath = logPath
+  state.status = 'connecting'
+  showSettings.value = false
+  await window.electronAPI.startTorLog(logPath)
+  await connectWebSocket()
+}
+
 // ── Electron connection ────────────────────────────────────────────────────
 let ws = null
 
@@ -165,22 +195,11 @@ async function connectWebSocket() {
   ws.onclose = () => {
     ws = null
     if (state.status === 'watching') state.status = 'idle'
-    // Fall back to IPC
     window.electronAPI?.onLogBatch((payload) => {
       payload.messages?.forEach((line) => processLine(line))
       window.electronAPI.sendIpcBatchProcessed(payload.batchId)
     })
   }
-}
-
-async function pickLogFile() {
-  if (!window.electronAPI) return
-  const filePath = await window.electronAPI.openFileDialog()
-  if (!filePath) return
-  state.logPath = filePath
-  state.status = 'connecting'
-  await window.electronAPI.startTorLog(filePath)
-  await connectWebSocket()
 }
 
 async function stopTracking() {
@@ -199,15 +218,30 @@ function resetSession() {
 const closeWindow = () => window.electronAPI?.closeWindow()
 const minimizeWindow = () => window.electronAPI?.minimizeWindow()
 
-onMounted(() => {
-  // If already in watching state (e.g. page reload), reconnect
-  window.electronAPI?.getTorStatus().then((s) => {
-    if (s?.isLoggingActive) {
-      state.logPath = s.currentLogPath
-      state.status = 'connecting'
-      connectWebSocket()
+onMounted(async () => {
+  // Already watching (e.g. page reload)
+  const s = await window.electronAPI?.getTorStatus()
+  if (s?.isLoggingActive) {
+    state.logPath = s.currentLogPath
+    state.status = 'connecting'
+    await connectWebSocket()
+    return
+  }
+  // Saved directory — auto-find and start
+  const savedDir = localStorage.getItem(STORAGE_KEY)
+  if (savedDir && window.electronAPI) {
+    findStatus.value = 'searching'
+    const found = await window.electronAPI.findLogInDir(savedDir)
+    if (found) {
+      findStatus.value = 'found'
+      await startWatching(found)
+    } else {
+      findStatus.value = 'not-found'
+      showSettings.value = true
     }
-  })
+  } else {
+    showSettings.value = true
+  }
 })
 
 onUnmounted(() => {
@@ -221,6 +255,7 @@ onUnmounted(() => {
     <div class="titlebar" style="-webkit-app-region: drag">
       <span class="titlebar-title">TLI Tracker</span>
       <div class="titlebar-controls" style="-webkit-app-region: no-drag">
+        <button class="tb-btn" @click="showSettings = !showSettings" title="Settings">⚙</button>
         <button class="tb-btn" @click="minimizeWindow">─</button>
         <button class="tb-btn tb-btn--close" @click="closeWindow">✕</button>
       </div>
@@ -229,15 +264,28 @@ onUnmounted(() => {
     <!-- Main content -->
     <div class="content">
 
-      <!-- Setup panel -->
-      <div v-if="state.status === 'idle'" class="setup-panel">
+      <!-- Settings overlay -->
+      <div v-if="showSettings" class="setup-panel">
         <h2>TLI Tracker</h2>
         <p class="hint">
-          Make sure <strong>Logging</strong> is enabled in TLI settings,<br>
-          then select your <code>UE_game.log</code> file.
+          Select your <strong>Torchlight Infinite</strong> game folder.<br>
+          The tracker will automatically find <code>UE_game.log</code> inside it.
         </p>
-        <button class="btn btn--primary" @click="pickLogFile">Select Log File</button>
-        <p v-if="state.logPath" class="log-path">{{ state.logPath }}</p>
+        <button class="btn btn--primary" @click="pickDirectory">
+          {{ gameDir ? 'Change Game Folder' : 'Select Game Folder' }}
+        </button>
+        <p v-if="gameDir" class="log-path">{{ gameDir }}</p>
+        <p v-if="findStatus === 'searching'" class="find-status">Searching…</p>
+        <p v-else-if="findStatus === 'not-found'" class="find-status find-status--error">
+          Could not find <code>UE_game.log</code> in that folder.<br>
+          Make sure <strong>Logging</strong> is enabled in TLI settings, then try again.
+        </p>
+        <button
+          v-if="state.status === 'watching' || state.logPath"
+          class="btn btn--small"
+          style="margin-top: 8px"
+          @click="showSettings = false"
+        >Back</button>
       </div>
 
       <!-- Connecting -->
@@ -377,6 +425,9 @@ onUnmounted(() => {
 .hint strong { color: #e5e7eb; }
 .hint code { background: rgba(255,255,255,0.08); padding: 1px 6px; border-radius: 3px; }
 .log-path { font-size: 11px; color: #6b7280; word-break: break-all; max-width: 400px; }
+.find-status { font-size: 12px; color: #9ca3af; }
+.find-status--error { color: #f87171; line-height: 1.6; }
+.find-status--error code { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px; }
 
 /* Buttons */
 .btn {

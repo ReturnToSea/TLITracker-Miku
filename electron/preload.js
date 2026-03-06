@@ -4,6 +4,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electronAPI', {
   getOSInfo: () => ipcRenderer.invoke('get-os-info'),
   openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
+  openDirectoryDialog: () => ipcRenderer.invoke('open-directory-dialog'),
+  findLogInDir: (dirPath) => ipcRenderer.invoke('find-log-in-dir', dirPath),
   runShellCommand: (cmd) => ipcRenderer.invoke('run-shell-command', cmd),
   saveToTemp: (data, filename) => ipcRenderer.invoke('save-to-temp', data, filename),
 

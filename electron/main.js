@@ -53,6 +53,13 @@ async function createWindow() {
     },
   });
 
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
+    dialog.showErrorBox(
+      'Failed to load',
+      `Could not load the app UI.\n\nURL: ${validatedURL}\nError: ${errorDescription} (${errorCode})\n\nExpected file: ${path.join(__dirname, '../frontend/dist/index.html')}`
+    );
+  });
+
   if (isDev) {
     await mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
@@ -170,6 +177,40 @@ async function createWindow() {
       properties: ['openFile'],
     });
     return result.canceled ? null : result.filePaths[0];
+  });
+
+  ipcMain.handle('open-directory-dialog', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Select your Torchlight Infinite folder',
+      properties: ['openDirectory'],
+    });
+    return result.canceled ? null : result.filePaths[0];
+  });
+
+  ipcMain.handle('find-log-in-dir', async (event, dirPath) => {
+    const fsSync = require('fs');
+    const TARGET = 'UE_game.log';
+
+    function search(dir, depth) {
+      if (depth > 6) return null;
+      let entries;
+      try { entries = fsSync.readdirSync(dir, { withFileTypes: true }); }
+      catch (_) { return null; }
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name === TARGET) {
+          return path.join(dir, entry.name);
+        }
+      }
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          const found = search(path.join(dir, entry.name), depth + 1);
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+
+    return search(dirPath, 0);
   });
 
   ipcMain.handle('run-shell-command', (event, cmd) => {
