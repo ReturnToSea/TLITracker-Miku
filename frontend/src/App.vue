@@ -192,8 +192,14 @@ const sessionProfit = computed(() => {
 
 const profitPerMin = computed(() => {
   if (!state.sessionStart) return 0
-  const mins = (Date.now() - state.sessionStart) / 60000
+  const mins = (now.value - state.sessionStart) / 60000
   return mins < 0.1 ? 0 : sessionProfit.value / mins
+})
+
+const profitPerHour = computed(() => {
+  if (!state.sessionStart) return 0
+  const hours = (now.value - state.sessionStart) / 3600000
+  return hours < (0.1 / 60) ? 0 : sessionProfit.value / hours
 })
 
 const logStatus = computed(() => {
@@ -211,7 +217,7 @@ const allMaps = computed(() => {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function startNewMap(areaId, mapId, checkType) {
-  if (state.currentMap) state.mapHistory.push({ ...state.currentMap })
+  if (state.currentMap) state.mapHistory.push({ ...state.currentMap, endTime: Date.now() })
   if (!state.sessionStart) state.sessionStart = Date.now()
   state.currentMap = { areaId, mapId, checkType, startTime: Date.now(), pickups: [] }
 }
@@ -254,6 +260,52 @@ function formatVal(n) {
   return n.toFixed(1)
 }
 
+function fmtDuration(ms) {
+  const secs = Math.max(0, Math.floor(ms / 1000))
+  const m = Math.floor(secs / 60)
+  const s = secs % 60
+  return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+function mapTime(map) {
+  return fmtDuration((map.endTime ?? now.value) - map.startTime)
+}
+
+const totalMapsTime = computed(() => {
+  const maps = [...state.mapHistory, ...(state.currentMap ? [state.currentMap] : [])]
+  const ms = maps.reduce((s, m) => s + ((m.endTime ?? now.value) - m.startTime), 0)
+  return fmtDuration(ms)
+})
+
+const realTime = computed(() => {
+  if (!state.sessionStart) return '0:00'
+  return fmtDuration(now.value - state.sessionStart)
+})
+
+const lootPanelItems = computed(() => {
+  let pickups = []
+  if (lootPanelMode.value === 'map' && state.currentMap) {
+    pickups = state.currentMap.pickups
+  } else {
+    const maps = [...state.mapHistory, ...(state.currentMap ? [state.currentMap] : [])]
+    maps.forEach(m => pickups.push(...m.pickups))
+  }
+  const grouped = {}
+  pickups.forEach(p => {
+    if (!grouped[p.baseId]) grouped[p.baseId] = { baseId: p.baseId, count: 0 }
+    grouped[p.baseId].count += p.count
+  })
+  return Object.values(grouped)
+    .map(p => ({ ...p, value: itemValue(p.baseId, p.count), name: state.priceNames[p.baseId] ?? `#${p.baseId}` }))
+    .sort((a, b) => b.value - a.value)
+})
+
+const inventorySorted = computed(() => {
+  return [...state.inventory]
+    .map(i => ({ ...i, value: itemValue(i.baseId, i.count), name: state.priceNames[i.baseId] ?? `#${i.baseId}` }))
+    .sort((a, b) => b.value - a.value)
+})
+
 function mapLabel(map) {
   if (map.mapId) return `Map ${map.mapId}`
   const prefix = map.areaId?.split('_')[0]
@@ -264,6 +316,8 @@ function mapLabel(map) {
 const STORAGE_KEY = 'tli-log-path'
 const activeTab = ref('overview')
 const logFilePath = ref(localStorage.getItem(STORAGE_KEY) ?? '')
+const now = ref(Date.now())
+const lootPanelMode = ref('map')
 
 async function pickLogFile() {
   if (!window.electronAPI) return
@@ -285,8 +339,7 @@ async function startWatching(logPath) {
   state.status = 'connecting'
   await window.electronAPI.startTorLog(logPath)
   await connectWebSocket()
-  // Tick every 30s to refresh profitPerMin display
-  profitTimer = setInterval(() => { state.sessionStart = state.sessionStart }, 30000)
+  profitTimer = setInterval(() => { now.value = Date.now() }, 1000)
 }
 
 async function connectWebSocket() {
@@ -435,6 +488,11 @@ onUnmounted(() => {
         >Pricing</button>
         <button
           class="tab-btn"
+          :class="{ active: activeTab === 'loot' }"
+          @click="activeTab = 'loot'"
+        >Loot</button>
+        <button
+          class="tab-btn"
           :class="{ active: activeTab === 'settings' }"
           @click="activeTab = 'settings'"
         >Settings</button>
@@ -446,20 +504,27 @@ onUnmounted(() => {
         <!-- Overview tab -->
         <div v-if="activeTab === 'overview'" class="panel">
 
-          <!-- Top stats -->
-          <div class="stats-row">
-            <div class="stat-card">
-              <div class="stat-label">Networth</div>
-              <div class="stat-value">{{ formatVal(networth) }} 🔥</div>
+          <!-- Top stats + reset -->
+          <div class="stats-top-row">
+            <div class="stats-row">
+              <div class="stat-card">
+                <div class="stat-label">Networth</div>
+                <div class="stat-value">{{ formatVal(networth) }} 🔥</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Profit</div>
+                <div class="stat-value">{{ formatVal(sessionProfit) }} 🔥</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">FE/min</div>
+                <div class="stat-value">{{ formatVal(profitPerMin) }} 🔥</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">FE/hr</div>
+                <div class="stat-value">{{ formatVal(profitPerHour) }} 🔥</div>
+              </div>
             </div>
-            <div class="stat-card">
-              <div class="stat-label">Profit</div>
-              <div class="stat-value">{{ formatVal(sessionProfit) }} 🔥</div>
-            </div>
-            <div class="stat-card">
-              <div class="stat-label">Profit/Min</div>
-              <div class="stat-value">{{ formatVal(profitPerMin) }} 🔥</div>
-            </div>
+            <button class="btn btn--small reset-btn" @click="resetSession">Reset Session</button>
           </div>
 
           <!-- Log status notice -->
@@ -477,33 +542,105 @@ onUnmounted(() => {
             </span>
           </div>
 
-          <!-- Map list -->
-          <div class="map-list-header">
-            <span class="col-area">Area</span>
-            <span class="col-cost">Cost</span>
-            <span class="col-made">Made</span>
-            <span class="col-profit">Profit</span>
-          </div>
-          <div class="map-list">
-            <div v-if="!allMaps.length" class="empty">No maps yet — enter a map in game.</div>
-            <div
-              v-for="(map, i) in allMaps"
-              :key="i"
-              class="map-row"
-              :class="{ 'map-row--live': map.live }"
-            >
-              <span class="col-area">
-                <span v-if="map.live" class="live-badge">LIVE</span>
-                {{ mapLabel(map) }}
-              </span>
-              <span class="col-cost muted">—</span>
-              <span class="col-made">{{ formatVal(mapProfit(map)) }}</span>
-              <span class="col-profit" :class="mapProfit(map) > 0 ? 'positive' : ''">
-                {{ formatVal(mapProfit(map)) }} 🔥
-              </span>
+          <!-- Timers -->
+          <div class="timers-row">
+            <div class="timer-item">
+              <span class="timer-label">Time in Maps</span>
+              <span class="timer-val">{{ totalMapsTime }}</span>
+            </div>
+            <div class="timer-item">
+              <span class="timer-label">Real Time</span>
+              <span class="timer-val">{{ realTime }}</span>
             </div>
           </div>
 
+          <!-- Map list + Loot panel -->
+          <div class="map-loot-area">
+            <div class="map-list-section">
+              <div class="map-list-header">
+                <span class="col-area">Area</span>
+                <span class="col-made">FE Made</span>
+                <span class="col-profit">Profit</span>
+                <span class="col-time">Time</span>
+              </div>
+              <div class="map-list">
+                <div v-if="!allMaps.length" class="empty">No maps yet — enter a map in game.</div>
+                <div
+                  v-for="(map, i) in allMaps"
+                  :key="i"
+                  class="map-row"
+                  :class="{ 'map-row--live': map.live }"
+                >
+                  <span class="col-area">
+                    <span v-if="map.live" class="live-badge">LIVE</span>
+                    {{ mapLabel(map) }}
+                  </span>
+                  <span class="col-made">{{ formatVal(mapProfit(map)) }} 🔥</span>
+                  <span class="col-profit" :class="mapProfit(map) > 0 ? 'positive' : ''">
+                    {{ formatVal(mapProfit(map)) }} 🔥
+                  </span>
+                  <span class="col-time muted">{{ mapTime(map) }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Loot panel -->
+            <div class="loot-panel">
+              <div class="loot-panel-header">
+                <span class="loot-panel-title">Loot</span>
+                <div class="loot-toggle">
+                  <button
+                    class="loot-toggle-btn"
+                    :class="{ active: lootPanelMode === 'map' }"
+                    @click="lootPanelMode = 'map'"
+                  >Map</button>
+                  <button
+                    class="loot-toggle-btn"
+                    :class="{ active: lootPanelMode === 'session' }"
+                    @click="lootPanelMode = 'session'"
+                  >Session</button>
+                </div>
+              </div>
+              <div class="loot-list">
+                <div v-if="!lootPanelItems.length" class="empty loot-empty">No loot yet.</div>
+                <div v-for="item in lootPanelItems" :key="item.baseId" class="loot-row">
+                  <span class="loot-name">{{ item.name }}</span>
+                  <span class="loot-count muted">×{{ item.count }}</span>
+                  <span class="loot-val">{{ formatVal(item.value) }} 🔥</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Loot tab -->
+        <div v-else-if="activeTab === 'loot'" class="panel">
+          <div class="pricing-header">
+            <div class="pricing-title">Inventory by Value</div>
+            <div class="pricing-meta">{{ inventorySorted.length }} items · {{ formatVal(networth) }} 🔥 total</div>
+          </div>
+          <div class="price-list-header inv-grid">
+            <span class="col-name">Item</span>
+            <span style="text-align:right">Qty</span>
+            <span style="text-align:right">Unit FE</span>
+            <span style="text-align:right">Total FE</span>
+          </div>
+          <div class="price-list">
+            <div v-if="!inventorySorted.length" class="empty">
+              No inventory data — sort your inventory or relog in game.
+            </div>
+            <div
+              v-for="item in inventorySorted"
+              :key="item.baseId"
+              class="price-row inv-grid"
+            >
+              <span class="col-name">{{ item.name }}</span>
+              <span style="text-align:right;color:#6b7280">×{{ item.count }}</span>
+              <span style="text-align:right;color:#9ca3af">{{ state.prices[item.baseId] != null ? state.prices[item.baseId] : '—' }}</span>
+              <span class="col-price price-val">{{ formatVal(item.value) }} 🔥</span>
+            </div>
+          </div>
         </div>
 
         <!-- Settings tab -->
@@ -658,7 +795,10 @@ onUnmounted(() => {
 .link-btn { background: none; border: none; color: #60a5fa; cursor: pointer; font-size: inherit; padding: 0; text-decoration: underline; font-family: inherit; }
 
 /* Stats row */
-.stats-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; flex-shrink: 0; }
+.stats-top-row { display: flex; align-items: flex-start; gap: 10px; flex-shrink: 0; }
+.stats-top-row .stats-row { flex: 1; }
+.reset-btn { flex-shrink: 0; align-self: flex-start; white-space: nowrap; }
+.stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .stat-card {
   background: rgba(255,255,255,0.04);
   border: 1px solid rgba(255,255,255,0.06);
@@ -683,10 +823,20 @@ onUnmounted(() => {
 .dot--need-inventory { background: #f59e0b; }
 .dot--disconnected { background: #ef4444; }
 
+/* Timers */
+.timers-row { display: flex; gap: 20px; flex-shrink: 0; }
+.timer-item { display: flex; flex-direction: column; }
+.timer-label { font-size: 10px; color: #4b5563; text-transform: uppercase; letter-spacing: 0.05em; }
+.timer-val { font-size: 15px; font-weight: 600; color: #d1d5db; font-variant-numeric: tabular-nums; }
+
+/* Map + loot area */
+.map-loot-area { display: flex; gap: 10px; flex: 1; overflow: hidden; }
+.map-list-section { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+
 /* Map list */
 .map-list-header {
   display: grid;
-  grid-template-columns: 1fr 70px 80px 90px;
+  grid-template-columns: 1fr 80px 80px 60px;
   padding: 4px 10px;
   font-size: 11px; color: #4b5563;
   text-transform: uppercase; letter-spacing: 0.04em;
@@ -695,7 +845,7 @@ onUnmounted(() => {
 .map-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
 .map-row {
   display: grid;
-  grid-template-columns: 1fr 70px 80px 90px;
+  grid-template-columns: 1fr 80px 80px 60px;
   padding: 8px 10px;
   background: rgba(255,255,255,0.03);
   border-radius: 5px; font-size: 13px; color: #d1d5db;
@@ -708,10 +858,46 @@ onUnmounted(() => {
   padding: 1px 4px; border-radius: 3px; margin-right: 5px; vertical-align: middle;
 }
 .col-area { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.col-cost, .col-made, .col-profit { text-align: right; }
+.col-made, .col-profit, .col-time { text-align: right; }
 .muted { color: #4b5563; }
 .positive { color: #86efac; }
 .empty { color: #374151; font-size: 13px; padding: 16px 0; text-align: center; }
+
+/* Loot panel (in overview) */
+.loot-panel {
+  width: 240px; flex-shrink: 0;
+  display: flex; flex-direction: column;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 8px; overflow: hidden;
+}
+.loot-panel-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.05);
+  flex-shrink: 0;
+}
+.loot-panel-title { font-size: 11px; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; }
+.loot-toggle { display: flex; gap: 2px; }
+.loot-toggle-btn {
+  padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500;
+  background: transparent; color: #4b5563; font-family: inherit; cursor: pointer; border: none;
+  transition: background 0.12s, color 0.12s;
+}
+.loot-toggle-btn:hover { background: rgba(255,255,255,0.06); color: #9ca3af; }
+.loot-toggle-btn.active { background: rgba(59,130,246,0.2); color: #93c5fd; }
+.loot-list { flex: 1; overflow-y: auto; padding: 4px; display: flex; flex-direction: column; gap: 1px; }
+.loot-row {
+  display: grid; grid-template-columns: 1fr 32px 70px;
+  padding: 5px 6px; border-radius: 4px; font-size: 12px; color: #d1d5db;
+  background: rgba(255,255,255,0.02);
+}
+.loot-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.loot-count { text-align: right; }
+.loot-val { text-align: right; color: #fbbf24; font-weight: 500; }
+.loot-empty { padding: 12px 0; font-size: 12px; }
+
+/* Inventory grid (loot tab) */
+.inv-grid { grid-template-columns: 1fr 50px 70px 80px !important; }
 
 /* Pricing tab */
 .pricing-header {
