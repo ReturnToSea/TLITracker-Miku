@@ -13,7 +13,19 @@ let lastSearchPriceId = null
 let inBagInit = false
 let pendingBagInventory = {}
 
+// JoinFight map entry tracking
+// Format: SwitchBattleAreaUtil:_JoinFightSuccess() followed by +mapId, +areaId, +checkType lines
+let inJoinFight = false
+let joinFightData = []
+
+// ResetItemsLayout tracking — Add events inside these blocks are inventory sorts, not pickups
+let inResetItemsLayout = false
+
 function handleItemChange(content) {
+  if (content.match(/^ProtoName=ResetItemsLayout\s+start/)) { inResetItemsLayout = true; return }
+  if (content.match(/^ProtoName=ResetItemsLayout\s+end/)) { inResetItemsLayout = false; return }
+  if (inResetItemsLayout) return  // ignore all events inside inventory sort blocks
+
   // Individual item pickup during gameplay
   const addMatch = content.match(/^Add Id=(\d+)_\S+ BagNum=(\d+)/)
   if (addMatch) {
@@ -70,6 +82,35 @@ function processLine(line) {
     state.hasInventory = true
     inBagInit = false
     pendingBagInventory = {}
+  }
+
+  // JoinFight map entry — SwitchBattleAreaUtil:_JoinFightSuccess() followed by data lines
+  if (line.match(/SwitchBattleAreaUtil:_JoinFightSuccess\(\)/)) {
+    inJoinFight = true
+    joinFightData = []
+    return
+  }
+
+  if (inJoinFight) {
+    const isNewLogLine = line.match(/^\[[^\]]+\]\[[^\]]+\]/)
+    if (isNewLogLine) {
+      // The game emits a blank "[Game] " log line immediately after _JoinFightSuccess()
+      // before the data lines — skip it and stay in collection mode
+      const isBlankGameLogLine = line.match(/\]GameLog:\sDisplay:\s\[Game\]\s*$/)
+      if (isBlankGameLogLine) return
+
+      // Real new log line — finalize the map entry
+      if (joinFightData.length > 0) {
+        const p = parseTorchlightData(joinFightData.join('\n'))
+        if (p.mapId) startNewMap(p.areaId, p.mapId, p.checkType)
+      }
+      inJoinFight = false
+      joinFightData = []
+      // fall through to process this line normally
+    } else if (!line.match(/errCode/) && line.trim()) {
+      joinFightData.push(line)
+      return
+    }
   }
 
   // ItemChange@ — individual item changes during gameplay (pickups)
@@ -229,10 +270,7 @@ function startNewMap(areaId, mapId, checkType) {
 }
 
 function addPickup(items) {
-  if (!state.currentMap) {
-    state.currentMap = { areaId: 'unknown', mapId: null, checkType: null, startTime: Date.now(), pickups: [] }
-    if (!state.sessionStart) state.sessionStart = Date.now()
-  }
+  if (!state.currentMap) return  // no known map yet — ignore pickups
   state.currentMap.pickups.push(...items)
 }
 
@@ -313,6 +351,7 @@ const inventorySorted = computed(() => {
 })
 
 function mapLabel(map) {
+  if (map.checkType && map.mapId) return `${map.checkType} ${map.mapId}`
   if (map.mapId) return `Map ${map.mapId}`
   const prefix = map.areaId?.split('_')[0]
   return prefix ? `Area ${prefix}` : 'Unknown'
@@ -394,9 +433,7 @@ function resetSession() {
   state.currentMap = null
   state.mapHistory = []
   state.sessionStart = null
-  state.isLogging = false
-  state.hasInventory = false
-  state.inventory = []
+  // Keep inventory — snapshot is still valid, no need to re-sort
 }
 
 const closeWindow = () => window.electronAPI?.closeWindow()
