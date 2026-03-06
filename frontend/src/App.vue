@@ -18,18 +18,36 @@ let pendingBagInventory = {}
 let inJoinFight = false
 let joinFightData = []
 
-// ResetItemsLayout tracking — Add events inside these blocks are inventory sorts, not pickups
+// Slot count tracking for pickup delta calculation
+// Maps item uuid → { baseId, count } — updated on ResetItemsLayout, used to diff PickItems
+const slotCounts = {}
 let inResetItemsLayout = false
+let inPickItems = false
 
 function handleItemChange(content) {
+  // Block start/end markers
   if (content.match(/^ProtoName=ResetItemsLayout\s+start/)) { inResetItemsLayout = true; return }
-  if (content.match(/^ProtoName=ResetItemsLayout\s+end/)) { inResetItemsLayout = false; return }
-  if (inResetItemsLayout) return  // ignore all events inside inventory sort blocks
+  if (content.match(/^ProtoName=ResetItemsLayout\s+end/))   { inResetItemsLayout = false; return }
+  if (content.match(/^ProtoName=PickItems\s+start/))        { inPickItems = true; return }
+  if (content.match(/^ProtoName=PickItems\s+end/))          { inPickItems = false; return }
 
-  // Individual item pickup during gameplay
-  const addMatch = content.match(/^Add Id=(\d+)_\S+ BagNum=(\d+)/)
-  if (addMatch) {
-    addPickup([{ baseId: addMatch[1], count: parseInt(addMatch[2]) }])
+  // Parse Update/Add lines: "Update Id=<baseId>_<uuid> BagNum=<count> in PageId=X SlotId=Y"
+  const m = content.match(/^(?:Update|Add) Id=(\d+)_(\S+) BagNum=(\d+)/)
+  if (!m) return
+  const [, baseId, uuid, newCountStr] = m
+  const newCount = parseInt(newCountStr)
+
+  if (inResetItemsLayout) {
+    // Track current slot state so we can diff against it during PickItems
+    slotCounts[uuid] = { baseId, count: newCount }
+    return
+  }
+
+  if (inPickItems) {
+    const prev = slotCounts[uuid]?.count ?? 0
+    const delta = newCount - prev
+    slotCounts[uuid] = { baseId, count: newCount }
+    if (delta > 0) addPickup([{ baseId, count: delta }])
   }
 }
 
@@ -102,7 +120,13 @@ function processLine(line) {
       // Real new log line — finalize the map entry
       if (joinFightData.length > 0) {
         const p = parseTorchlightData(joinFightData.join('\n'))
-        if (p.mapId) startNewMap(p.areaId, p.mapId, p.checkType)
+        if (p.mapId) {
+          // Extract SpAreaId / SpAreaLevel from worldInitArgs.extraArgs for map labelling
+          const extraArgs = Object.values(p.worldInitArgs?.extraArgs ?? {})
+          const spAreaId = extraArgs.find(a => a.KeyType === 'SpAreaId')?.value
+          const spAreaLevel = extraArgs.find(a => a.KeyType === 'SpAreaLevel')?.value
+          startNewMap(p.areaId, p.mapId, p.checkType, spAreaId, spAreaLevel)
+        }
       }
       inJoinFight = false
       joinFightData = []
@@ -255,7 +279,7 @@ const allMaps = computed(() => {
 // ── Helpers ────────────────────────────────────────────────────────────────
 const NON_MAP_TYPES = new Set(['MainCity', 'WorldBossChallengeMap', 'BossChallengeMap', 'TeamTdMap'])
 
-function startNewMap(areaId, mapId, checkType) {
+function startNewMap(areaId, mapId, checkType, spAreaId, spAreaLevel) {
   if (NON_MAP_TYPES.has(checkType)) {
     // Entering town or non-farm area — finalize current map but don't start a new one
     if (state.currentMap) {
@@ -266,7 +290,7 @@ function startNewMap(areaId, mapId, checkType) {
   }
   if (state.currentMap) state.mapHistory.push({ ...state.currentMap, endTime: Date.now() })
   if (!state.sessionStart) state.sessionStart = Date.now()
-  state.currentMap = { areaId, mapId, checkType, startTime: Date.now(), pickups: [] }
+  state.currentMap = { areaId, mapId, checkType, spAreaId, spAreaLevel, startTime: Date.now(), pickups: [] }
 }
 
 function addPickup(items) {
@@ -351,7 +375,10 @@ const inventorySorted = computed(() => {
 })
 
 function mapLabel(map) {
-  if (map.checkType && map.mapId) return `${map.checkType} ${map.mapId}`
+  if (map.spAreaId) {
+    const level = map.spAreaLevel ? ` Lv${map.spAreaLevel}` : ''
+    return `Zone ${map.spAreaId}${level}`
+  }
   if (map.mapId) return `Map ${map.mapId}`
   const prefix = map.areaId?.split('_')[0]
   return prefix ? `Area ${prefix}` : 'Unknown'
