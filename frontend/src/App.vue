@@ -24,6 +24,8 @@ const slotCounts = {}
 let inResetItemsLayout = false
 let inPickItems = false
 let inSpv3Open = false
+let inXchgForSale = false
+let inXchgReceive = false
 
 // Items consumed before entering a map (beacons, compasses, etc.)
 // Gets attached to the next dungeon map that starts, then cleared.
@@ -37,6 +39,26 @@ function handleItemChange(content) {
   if (content.match(/^ProtoName=PickItems\s+end/))          { inPickItems = false; return }
   if (content.match(/^ProtoName=Spv3Open\s+start/))         { inSpv3Open = true; return }
   if (content.match(/^ProtoName=Spv3Open\s+end/))           { inSpv3Open = false; return }
+  if (content.match(/^ProtoName=XchgForSale\s+start/))      { inXchgForSale = true; return }
+  if (content.match(/^ProtoName=XchgForSale\s+end/))        { inXchgForSale = false; return }
+  if (content.match(/^ProtoName=XchgReceive\s+start/))      { inXchgReceive = true; return }
+  if (content.match(/^ProtoName=XchgReceive\s+end/))        { inXchgReceive = false; return }
+
+  // Listing an item on market: Delete Id=<baseId>_<uuid> in PageId=X SlotId=Y
+  if (inXchgForSale) {
+    const del = content.match(/^Delete Id=(\d+)_(\S+)/)
+    if (del) {
+      const [, baseId, uuid] = del
+      const removed = slotCounts[uuid]?.count ?? 1
+      delete slotCounts[uuid]
+      const idx = state.inventory.findIndex(i => i.baseId === baseId)
+      if (idx >= 0) {
+        state.inventory[idx].count -= removed
+        if (state.inventory[idx].count <= 0) state.inventory.splice(idx, 1)
+      }
+    }
+    return
+  }
 
   // Parse Update/Add lines: "Update Id=<baseId>_<uuid> BagNum=<count> in PageId=X SlotId=Y"
   const m = content.match(/^(?:Update|Add) Id=(\d+)_(\S+) BagNum=(\d+)/)
@@ -63,6 +85,24 @@ function handleItemChange(content) {
     const delta = newCount - prev
     slotCounts[uuid] = { baseId, count: newCount }
     if (delta < 0) pendingCosts.push({ baseId, count: -delta })  // consumed item
+    return
+  }
+
+  if (inXchgReceive) {
+    // Claiming proceeds from a sale — update inventory with the delta (e.g. FE received)
+    const prev = slotCounts[uuid]?.count ?? 0
+    const delta = newCount - prev
+    slotCounts[uuid] = { baseId, count: newCount }
+    if (delta !== 0) {
+      const idx = state.inventory.findIndex(i => i.baseId === baseId)
+      if (delta > 0) {
+        if (idx >= 0) state.inventory[idx].count += delta
+        else state.inventory.push({ baseId, count: delta })
+      } else if (idx >= 0) {
+        state.inventory[idx].count += delta
+        if (state.inventory[idx].count <= 0) state.inventory.splice(idx, 1)
+      }
+    }
   }
 }
 
@@ -322,6 +362,7 @@ function startNewMap(areaId, mapId, checkType, spAreaId, spAreaLevel) {
   if (!state.sessionStart) state.sessionStart = Date.now()
   const costs = [...pendingCosts]
   pendingCosts = []
+  selectedMapTime.value = null
   state.currentMap = { areaId, mapId, checkType, spAreaId, spAreaLevel, startTime: Date.now(), pickups: [], costs }
 }
 
@@ -356,7 +397,7 @@ function updatePrice(data, itemId) {
 
 function formatVal(n) {
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M'
-  if (n >= 1000) return (n / 1000).toFixed(1) + 'K'
+  if (n >= 100000) return (n / 1000).toFixed(1) + 'K'
   return n.toFixed(1)
 }
 
@@ -381,7 +422,11 @@ const realTime = computed(() => {
 const lootPanelItems = computed(() => {
   let maps
   if (lootPanelMode.value === 'map') {
-    const singleMap = state.currentMap ?? state.mapHistory[state.mapHistory.length - 1] ?? null
+    const allM = [...state.mapHistory, ...(state.currentMap ? [state.currentMap] : [])]
+    const singleMap = (selectedMapTime.value != null ? allM.find(m => m.startTime === selectedMapTime.value) : null)
+      ?? state.currentMap
+      ?? state.mapHistory[state.mapHistory.length - 1]
+      ?? null
     maps = singleMap ? [singleMap] : []
   } else {
     maps = [...state.mapHistory, ...(state.currentMap ? [state.currentMap] : [])]
@@ -428,6 +473,7 @@ const now = ref(Date.now())
 const lootPanelMode = ref('map')       // 'map' | 'session' — scope of loot/cost panel
 const lootContentMode = ref('loot')    // 'loot' | 'cost' — what the panel shows
 const rateMode = ref('hr')             // 'hr' | 'min' — FE rate card toggle
+const selectedMapTime = ref(null)      // startTime of map clicked in list; null = auto (current/last)
 
 async function pickLogFile() {
   if (!window.electronAPI) return
@@ -680,7 +726,8 @@ onUnmounted(() => {
                   v-for="(map, i) in allMaps"
                   :key="i"
                   class="map-row"
-                  :class="{ 'map-row--live': map.live }"
+                  :class="{ 'map-row--live': map.live, 'map-row--selected': selectedMapTime === map.startTime || (selectedMapTime === null && map.live) }"
+                  @click="selectedMapTime = map.startTime; lootPanelMode = 'map'"
                 >
                   <span class="col-area">
                     <span v-if="map.live" class="live-badge">LIVE</span>
@@ -972,6 +1019,9 @@ onUnmounted(() => {
   border: 1px solid transparent;
 }
 .map-row--live { border-color: rgba(59,130,246,0.25); background: rgba(59,130,246,0.06); }
+.map-row--selected { border-color: rgba(251,191,36,0.3); background: rgba(251,191,36,0.05); cursor: default; }
+.map-row { cursor: pointer; }
+.map-row:hover { background: rgba(255,255,255,0.05); }
 .live-badge {
   display: inline-block; font-size: 9px; font-weight: 700;
   background: #3b82f6; color: #fff;

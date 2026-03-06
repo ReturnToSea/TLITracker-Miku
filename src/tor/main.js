@@ -70,13 +70,7 @@ async function mainWatch(logPath, routeLogMessage) {
     const stats = await fsPromises.stat(nowLogPath);
     // 每次启动都从文件末尾开始，这是最符合用户预期的行为
     lastPosition = stats.size;
-    if (isDev) {
-      // 开发模式下可以从头读取用于测试
-      console.log('开发模式下将从头读取');
-      lastPosition = 0;
-    } else {
-      console.log('初始文件大小，将从末尾开始读取:', lastPosition);
-    }
+    console.log('Starting from end of file:', lastPosition);
 
     // =================================================================
     // 核心修改：fs.watch 只负责“通知”，不直接触发处理
