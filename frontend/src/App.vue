@@ -18,11 +18,16 @@ let pendingBagInventory = {}
 let inJoinFight = false
 let joinFightData = []
 
-// Slot count tracking for pickup delta calculation
-// Maps item uuid → { baseId, count } — updated on ResetItemsLayout, used to diff PickItems
+// Slot count tracking for pickup/cost delta calculation
+// Maps item uuid → { baseId, count } — updated on ResetItemsLayout, used to diff PickItems/Spv3Open
 const slotCounts = {}
 let inResetItemsLayout = false
 let inPickItems = false
+let inSpv3Open = false
+
+// Items consumed before entering a map (beacons, compasses, etc.)
+// Gets attached to the next dungeon map that starts, then cleared.
+let pendingCosts = []
 
 function handleItemChange(content) {
   // Block start/end markers
@@ -30,6 +35,8 @@ function handleItemChange(content) {
   if (content.match(/^ProtoName=ResetItemsLayout\s+end/))   { inResetItemsLayout = false; return }
   if (content.match(/^ProtoName=PickItems\s+start/))        { inPickItems = true; return }
   if (content.match(/^ProtoName=PickItems\s+end/))          { inPickItems = false; return }
+  if (content.match(/^ProtoName=Spv3Open\s+start/))         { inSpv3Open = true; return }
+  if (content.match(/^ProtoName=Spv3Open\s+end/))           { inSpv3Open = false; return }
 
   // Parse Update/Add lines: "Update Id=<baseId>_<uuid> BagNum=<count> in PageId=X SlotId=Y"
   const m = content.match(/^(?:Update|Add) Id=(\d+)_(\S+) BagNum=(\d+)/)
@@ -38,7 +45,7 @@ function handleItemChange(content) {
   const newCount = parseInt(newCountStr)
 
   if (inResetItemsLayout) {
-    // Track current slot state so we can diff against it during PickItems
+    // Track current slot state so we can diff against it during PickItems / Spv3Open
     slotCounts[uuid] = { baseId, count: newCount }
     return
   }
@@ -48,6 +55,14 @@ function handleItemChange(content) {
     const delta = newCount - prev
     slotCounts[uuid] = { baseId, count: newCount }
     if (delta > 0) addPickup([{ baseId, count: delta }])
+    return
+  }
+
+  if (inSpv3Open) {
+    const prev = slotCounts[uuid]?.count ?? 0
+    const delta = newCount - prev
+    slotCounts[uuid] = { baseId, count: newCount }
+    if (delta < 0) pendingCosts.push({ baseId, count: -delta })  // consumed item
   }
 }
 
@@ -238,8 +253,16 @@ function itemValue(baseId, count) {
   return (state.prices[baseId] ?? 0) * count
 }
 
-function mapProfit(map) {
+function mapGross(map) {
   return map.pickups.reduce((s, p) => s + itemValue(p.baseId, p.count), 0)
+}
+
+function mapCost(map) {
+  return (map.costs ?? []).reduce((s, c) => s + itemValue(c.baseId, c.count), 0)
+}
+
+function mapProfit(map) {
+  return mapGross(map) - mapCost(map)
 }
 
 const networth = computed(() =>
@@ -251,16 +274,22 @@ const sessionProfit = computed(() => {
   return maps.reduce((s, m) => s + mapProfit(m), 0)
 })
 
-const profitPerMin = computed(() => {
-  if (!state.sessionStart) return 0
-  const mins = (now.value - state.sessionStart) / 60000
-  return mins < 0.1 ? 0 : sessionProfit.value / mins
+const totalMapsMs = computed(() => {
+  const maps = [...state.mapHistory, ...(state.currentMap ? [state.currentMap] : [])]
+  return maps.reduce((s, m) => s + ((m.endTime ?? now.value) - m.startTime), 0)
 })
 
-const profitPerHour = computed(() => {
+const profitRateMapTime = computed(() => {
+  const ms = totalMapsMs.value
+  if (ms < 6000) return 0
+  return rateMode.value === 'hr' ? sessionProfit.value / (ms / 3600000) : sessionProfit.value / (ms / 60000)
+})
+
+const profitRateRealTime = computed(() => {
   if (!state.sessionStart) return 0
-  const hours = (now.value - state.sessionStart) / 3600000
-  return hours < (0.1 / 60) ? 0 : sessionProfit.value / hours
+  const ms = now.value - state.sessionStart
+  if (ms < 6000) return 0
+  return rateMode.value === 'hr' ? sessionProfit.value / (ms / 3600000) : sessionProfit.value / (ms / 60000)
 })
 
 const logStatus = computed(() => {
@@ -286,11 +315,14 @@ function startNewMap(areaId, mapId, checkType, spAreaId, spAreaLevel) {
       state.mapHistory.push({ ...state.currentMap, endTime: Date.now() })
       state.currentMap = null
     }
+    pendingCosts = []
     return
   }
   if (state.currentMap) state.mapHistory.push({ ...state.currentMap, endTime: Date.now() })
   if (!state.sessionStart) state.sessionStart = Date.now()
-  state.currentMap = { areaId, mapId, checkType, spAreaId, spAreaLevel, startTime: Date.now(), pickups: [] }
+  const costs = [...pendingCosts]
+  pendingCosts = []
+  state.currentMap = { areaId, mapId, checkType, spAreaId, spAreaLevel, startTime: Date.now(), pickups: [], costs }
 }
 
 function addPickup(items) {
@@ -339,11 +371,7 @@ function mapTime(map) {
   return fmtDuration((map.endTime ?? now.value) - map.startTime)
 }
 
-const totalMapsTime = computed(() => {
-  const maps = [...state.mapHistory, ...(state.currentMap ? [state.currentMap] : [])]
-  const ms = maps.reduce((s, m) => s + ((m.endTime ?? now.value) - m.startTime), 0)
-  return fmtDuration(ms)
-})
+const totalMapsTime = computed(() => fmtDuration(totalMapsMs.value))
 
 const realTime = computed(() => {
   if (!state.sessionStart) return '0:00'
@@ -351,15 +379,19 @@ const realTime = computed(() => {
 })
 
 const lootPanelItems = computed(() => {
-  let pickups = []
-  if (lootPanelMode.value === 'map' && state.currentMap) {
-    pickups = state.currentMap.pickups
+  const maps = lootPanelMode.value === 'map' && state.currentMap
+    ? [state.currentMap]
+    : [...state.mapHistory, ...(state.currentMap ? [state.currentMap] : [])]
+
+  const raw = []
+  if (lootContentMode.value === 'cost') {
+    maps.forEach(m => raw.push(...(m.costs ?? [])))
   } else {
-    const maps = [...state.mapHistory, ...(state.currentMap ? [state.currentMap] : [])]
-    maps.forEach(m => pickups.push(...m.pickups))
+    maps.forEach(m => raw.push(...m.pickups))
   }
+
   const grouped = {}
-  pickups.forEach(p => {
+  raw.forEach(p => {
     if (!grouped[p.baseId]) grouped[p.baseId] = { baseId: p.baseId, count: 0 }
     grouped[p.baseId].count += p.count
   })
@@ -389,7 +421,9 @@ const STORAGE_KEY = 'tli-log-path'
 const activeTab = ref('overview')
 const logFilePath = ref(localStorage.getItem(STORAGE_KEY) ?? '')
 const now = ref(Date.now())
-const lootPanelMode = ref('map')
+const lootPanelMode = ref('map')       // 'map' | 'session' — scope of loot/cost panel
+const lootContentMode = ref('loot')    // 'loot' | 'cost' — what the panel shows
+const rateMode = ref('hr')             // 'hr' | 'min' — FE rate card toggle
 
 async function pickLogFile() {
   if (!window.electronAPI) return
@@ -587,13 +621,13 @@ onUnmounted(() => {
                 <div class="stat-label">Profit</div>
                 <div class="stat-value">{{ formatVal(sessionProfit) }} 🔥</div>
               </div>
-              <div class="stat-card">
-                <div class="stat-label">FE/min</div>
-                <div class="stat-value">{{ formatVal(profitPerMin) }} 🔥</div>
-              </div>
-              <div class="stat-card">
-                <div class="stat-label">FE/hr</div>
-                <div class="stat-value">{{ formatVal(profitPerHour) }} 🔥</div>
+              <div class="stat-card rate-card">
+                <div class="rate-card-top">
+                  <button class="rate-mode-btn" @click="rateMode = rateMode === 'hr' ? 'min' : 'hr'">/{{ rateMode }}</button>
+                  <div class="stat-label">FE/{{ rateMode }}</div>
+                </div>
+                <div class="stat-value">{{ formatVal(profitRateMapTime) }} 🔥</div>
+                <div class="rate-real-time">{{ formatVal(profitRateRealTime) }} 🔥 real time</div>
               </div>
             </div>
             <button class="btn btn--small reset-btn" @click="resetSession">Reset Session</button>
@@ -631,7 +665,8 @@ onUnmounted(() => {
             <div class="map-list-section">
               <div class="map-list-header">
                 <span class="col-area">Area</span>
-                <span class="col-made">FE Made</span>
+                <span class="col-gross">Gross</span>
+                <span class="col-cost">Cost</span>
                 <span class="col-profit">Profit</span>
                 <span class="col-time">Time</span>
               </div>
@@ -647,8 +682,9 @@ onUnmounted(() => {
                     <span v-if="map.live" class="live-badge">LIVE</span>
                     {{ mapLabel(map) }}
                   </span>
-                  <span class="col-made">{{ formatVal(mapProfit(map)) }} 🔥</span>
-                  <span class="col-profit" :class="mapProfit(map) > 0 ? 'positive' : ''">
+                  <span class="col-gross muted">{{ formatVal(mapGross(map)) }}</span>
+                  <span class="col-cost cost-val">{{ mapCost(map) > 0 ? formatVal(mapCost(map)) : '—' }}</span>
+                  <span class="col-profit" :class="mapProfit(map) >= 0 ? 'positive' : 'negative'">
                     {{ formatVal(mapProfit(map)) }} 🔥
                   </span>
                   <span class="col-time muted">{{ mapTime(map) }}</span>
@@ -656,29 +692,26 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <!-- Loot panel -->
+            <!-- Loot/Cost panel -->
             <div class="loot-panel">
               <div class="loot-panel-header">
-                <span class="loot-panel-title">Loot</span>
                 <div class="loot-toggle">
-                  <button
-                    class="loot-toggle-btn"
-                    :class="{ active: lootPanelMode === 'map' }"
-                    @click="lootPanelMode = 'map'"
-                  >Map</button>
-                  <button
-                    class="loot-toggle-btn"
-                    :class="{ active: lootPanelMode === 'session' }"
-                    @click="lootPanelMode = 'session'"
-                  >Session</button>
+                  <button class="loot-toggle-btn" :class="{ active: lootContentMode === 'loot' }" @click="lootContentMode = 'loot'">Loot</button>
+                  <button class="loot-toggle-btn" :class="{ active: lootContentMode === 'cost' }" @click="lootContentMode = 'cost'">Cost</button>
+                </div>
+                <div class="loot-toggle">
+                  <button class="loot-toggle-btn" :class="{ active: lootPanelMode === 'map' }" @click="lootPanelMode = 'map'">Map</button>
+                  <button class="loot-toggle-btn" :class="{ active: lootPanelMode === 'session' }" @click="lootPanelMode = 'session'">Session</button>
                 </div>
               </div>
               <div class="loot-list">
-                <div v-if="!lootPanelItems.length" class="empty loot-empty">No loot yet.</div>
+                <div v-if="!lootPanelItems.length" class="empty loot-empty">
+                  {{ lootContentMode === 'cost' ? 'No cost items detected.' : 'No loot yet.' }}
+                </div>
                 <div v-for="item in lootPanelItems" :key="item.baseId" class="loot-row">
                   <span class="loot-name">{{ item.name }}</span>
                   <span class="loot-count muted">×{{ item.count }}</span>
-                  <span class="loot-val">{{ formatVal(item.value) }} 🔥</span>
+                  <span class="loot-val" :class="lootContentMode === 'cost' ? 'cost-val' : ''">{{ formatVal(item.value) }} 🔥</span>
                 </div>
               </div>
             </div>
@@ -870,7 +903,7 @@ onUnmounted(() => {
 .stats-top-row { display: flex; align-items: flex-start; gap: 10px; flex-shrink: 0; }
 .stats-top-row .stats-row { flex: 1; }
 .reset-btn { flex-shrink: 0; align-self: flex-start; white-space: nowrap; }
-.stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.stats-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .stat-card {
   background: rgba(255,255,255,0.04);
   border: 1px solid rgba(255,255,255,0.06);
@@ -878,6 +911,17 @@ onUnmounted(() => {
 }
 .stat-label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
 .stat-value { font-size: 18px; font-weight: 600; color: #f9fafb; }
+
+/* Rate card */
+.rate-card { position: relative; }
+.rate-card-top { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.rate-mode-btn {
+  padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600;
+  background: rgba(59,130,246,0.2); color: #93c5fd; border: none; cursor: pointer;
+  font-family: inherit; transition: background 0.12s;
+}
+.rate-mode-btn:hover { background: rgba(59,130,246,0.35); }
+.rate-real-time { font-size: 11px; color: #4b5563; margin-top: 3px; }
 
 /* Status notice */
 .status-notice {
@@ -908,7 +952,7 @@ onUnmounted(() => {
 /* Map list */
 .map-list-header {
   display: grid;
-  grid-template-columns: 1fr 80px 80px 60px;
+  grid-template-columns: 1fr 65px 60px 75px 55px;
   padding: 4px 10px;
   font-size: 11px; color: #4b5563;
   text-transform: uppercase; letter-spacing: 0.04em;
@@ -917,7 +961,7 @@ onUnmounted(() => {
 .map-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
 .map-row {
   display: grid;
-  grid-template-columns: 1fr 80px 80px 60px;
+  grid-template-columns: 1fr 65px 60px 75px 55px;
   padding: 8px 10px;
   background: rgba(255,255,255,0.03);
   border-radius: 5px; font-size: 13px; color: #d1d5db;
@@ -930,9 +974,11 @@ onUnmounted(() => {
   padding: 1px 4px; border-radius: 3px; margin-right: 5px; vertical-align: middle;
 }
 .col-area { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.col-made, .col-profit, .col-time { text-align: right; }
+.col-gross, .col-cost, .col-profit, .col-time { text-align: right; }
 .muted { color: #4b5563; }
 .positive { color: #86efac; }
+.negative { color: #f87171; }
+.cost-val { color: #fb923c; }
 .empty { color: #374151; font-size: 13px; padding: 16px 0; text-align: center; }
 
 /* Loot panel (in overview) */
@@ -945,10 +991,9 @@ onUnmounted(() => {
 }
 .loot-panel-header {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.05);
-  flex-shrink: 0;
+  padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.05);
+  flex-shrink: 0; gap: 4px;
 }
-.loot-panel-title { font-size: 11px; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; }
 .loot-toggle { display: flex; gap: 2px; }
 .loot-toggle-btn {
   padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500;
