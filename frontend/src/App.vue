@@ -379,9 +379,13 @@ const realTime = computed(() => {
 })
 
 const lootPanelItems = computed(() => {
-  const maps = lootPanelMode.value === 'map' && state.currentMap
-    ? [state.currentMap]
-    : [...state.mapHistory, ...(state.currentMap ? [state.currentMap] : [])]
+  let maps
+  if (lootPanelMode.value === 'map') {
+    const singleMap = state.currentMap ?? state.mapHistory[state.mapHistory.length - 1] ?? null
+    maps = singleMap ? [singleMap] : []
+  } else {
+    maps = [...state.mapHistory, ...(state.currentMap ? [state.currentMap] : [])]
+  }
 
   const raw = []
   if (lootContentMode.value === 'cost') {
