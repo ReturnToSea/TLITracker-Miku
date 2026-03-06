@@ -20,43 +20,24 @@ const fs = require('fs');
 // Followed by indented data lines until an End line appears.
 
 const SAMPLE_LOG = `
-[2025.10.18-08.57.57:488][486]GameLog: Display: [Game] ----Socket RecvMessage STT----ResetItemsLayout----SynId = 101
-+PageId [102]
-+items+1+baseId [3004]
-|      +count [5]
-|      +uuid [abc-001]
-+items+2+baseId [100300]
-|      +count [120]
-|      +uuid [abc-002]
-+items+3+baseId [2001]
-|      +count [1]
-|      +uuid [abc-003]
-[2025.10.18-08.57.57:489][486]GameLog: Display: [Game] ----Socket RecvMessage End----ResetItemsLayout----SynId = 101
+[2026.03.06-04.51.18:479][445]GameLog: Display: [Game] BagMgr@:InitBagData PageId = 101 SlotId = 35 ConfigBaseId = 7101 Num = 1
+[2026.03.06-04.51.18:479][445]GameLog: Display: [Game] BagMgr@:InitBagData PageId = 101 SlotId = 36 ConfigBaseId = 7087 Num = 1
+[2026.03.06-04.51.18:479][445]GameLog: Display: [Game] BagMgr@:InitBagData PageId = 102 SlotId = 1 ConfigBaseId = 100300 Num = 999
+[2026.03.06-04.51.18:479][445]GameLog: Display: [Game] BagMgr@:InitBagData PageId = 102 SlotId = 2 ConfigBaseId = 100300 Num = 999
+[2026.03.06-04.51.18:479][445]GameLog: Display: [Game] BagMgr@:InitBagData PageId = 102 SlotId = 3 ConfigBaseId = 100300 Num = 999
+[2026.03.06-04.51.18:479][445]GameLog: Display: [Game] BagMgr@:InitBagData PageId = 102 SlotId = 4 ConfigBaseId = 100300 Num = 999
+[2026.03.06-04.51.18:480][445]GameLog: Display: [Game] BagMgr@:InitBagData PageId = 102 SlotId = 5 ConfigBaseId = 100300 Num = 531
+[2026.03.06-04.51.18:480][445]GameLog: Display: [Game] BagMgr@:InitBagData PageId = 102 SlotId = 6 ConfigBaseId = 101200 Num = 200
+[2026.03.06-04.51.18:480][445]GameLog: Display: [Game] BagMgr@:InitBagData PageId = 102 SlotId = 7 ConfigBaseId = 100200 Num = 999
+[2026.03.06-04.51.18:480][445]GameLog: Display: [Game] BagMgr@:InitBagData PageId = 102 SlotId = 8 ConfigBaseId = 100200 Num = 999
+[2026.03.06-04.51.18:480][445]GameLog: Display: [Game] BagMgr@:InitBagData PageId = 102 SlotId = 9 ConfigBaseId = 100200 Num = 999
+[2026.03.06-04.51.18:481][445]GameLog: Display: [Game] SomeOtherLog: unrelated line
 
-[2025.10.18-08.58.10:100][510]GameLog: Display: [Game] ----Socket RecvMessage STT----PickItem----SynId = 200
-+baseId [3004]
-+count [2]
-+uuid [pick-001]
-[2025.10.18-08.58.10:101][510]GameLog: Display: [Game] ----Socket RecvMessage End----PickItem----SynId = 200
-
-[2025.10.18-08.58.15:200][520]GameLog: Display: [Game] ----Socket RecvMessage STT----PickItems----SynId = 201
-+items+1+baseId [100300]
-|      +count [50]
-|      +uuid [pick-002]
-+items+2+baseId [3004]
-|      +count [3]
-|      +uuid [pick-003]
-[2025.10.18-08.58.15:201][520]GameLog: Display: [Game] ----Socket RecvMessage End----PickItems----SynId = 201
-
-[2025.10.18-08.58.30:300][540]GameLog: Display: [Game] ----Socket SendMessage STT----XchgSyncSearchPrice----SynId = 300
-+itemBaseId [3004]
-[2025.10.18-08.58.30:301][540]GameLog: Display: [Game] ----Socket SendMessage End----XchgSyncSearchPrice----SynId = 300
-
-[2025.10.18-08.58.30:350][541]GameLog: Display: [Game] ----Socket SendMessage STT----XchgSearchPrice----SynId = 301
+[2026.03.06-04.58.30:350][541]GameLog: Display: [Game] ----Socket SendMessage STT----XchgSearchPrice----SynId = 301
 +filters+1+refer [3004]
-[2025.10.18-08.58.30:351][541]GameLog: Display: [Game] ----Socket SendMessage End----XchgSearchPrice----SynId = 301
+[2026.03.06-04.58.30:351][541]GameLog: Display: [Game] ----Socket SendMessage End----XchgSearchPrice----SynId = 301
 
-[2025.10.18-08.58.30:400][542]GameLog: Display: [Game] ----Socket RecvMessage STT----XchgSearchPrice----SynId = 301
+[2026.03.06-04.58.30:400][542]GameLog: Display: [Game] ----Socket RecvMessage STT----XchgSearchPrice----SynId = 301
 +prices+1+currency [100300]
 |       +unitPrices+1 [0.5]
 |       |           +2 [0.5]
@@ -64,52 +45,73 @@ const SAMPLE_LOG = `
 |       |           +4 [0.5]
 |       |           +5 [0.7]
 +itemGoldId [3004]
-[2025.10.18-08.58.30:401][542]GameLog: Display: [Game] ----Socket RecvMessage End----XchgSearchPrice----SynId = 301
+[2026.03.06-04.58.30:401][542]GameLog: Display: [Game] ----Socket RecvMessage End----XchgSearchPrice----SynId = 301
 
-[2025.10.18-08.59.00:500][600]GameLog: Display: [Game] ----Socket RecvMessage STT----EnterArea----SynId = 400
+[2026.03.06-04.59.00:500][600]GameLog: Display: [Game] ----Socket RecvMessage STT----EnterArea----SynId = 400
 +p4version [4222817]
 +AreaUniqueId [3314649325744692261]
 +areaId [110_df24d82e-ae4f-11f0-b2ba-00000000005c]
 +mapId [111000]
 +checkType [DungeonMap]
-[2025.10.18-08.59.00:501][600]GameLog: Display: [Game] ----Socket RecvMessage End----EnterArea----SynId = 400
+[2026.03.06-04.59.00:501][600]GameLog: Display: [Game] ----Socket RecvMessage End----EnterArea----SynId = 400
 `.trim();
 
-// ─── Wire up the dealMsg pipeline ────────────────────────────────────────────
-// tor/main.js exports the data parsers but dealMsg is internal.
-// We reproduce the routing here so we can capture parsed events cleanly.
+// ─── Wire up the parsing pipeline ────────────────────────────────────────────
 
 const msgStartReg =
   /\[([^\]]+)\]\[[^\]]+\]GameLog:\sDisplay:\s\[Game\]\s-+.*(SendMessage|PushMessage|RecvMessage|RecvPushMsg)\sSTT-+([^-]+)-+SynId\s=\s(\d*).*/i;
 
 let lastNotCompleteMsg = null;
 let lastSearchPriceId = null;
+let inBagInit = false;
+let pendingBagInventory = {};
 const events = [];
 
-function routeLine(line) {
-  const isMsgEnd = line.match(/.*(SendMessage|PushMessage|RecvMessage|RecvPushMsg)\sEnd.*/i);
+function handleItemChange(content) {
+  // Individual item pickup during gameplay
+  const addMatch = content.match(/^Add Id=(\d+)_\S+ BagNum=(\d+)/);
+  if (addMatch) {
+    events.push({ type: 'PickItem', baseId: addMatch[1], count: parseInt(addMatch[2]) });
+  }
+}
 
+function routeLine(line) {
+  // BagMgr@:InitBagData — full inventory snapshot (login / area enter)
+  const bagMatch = line.match(/BagMgr@:InitBagData.*ConfigBaseId\s*=\s*(\d+)\s+Num\s*=\s*(\d+)/);
+  if (bagMatch) {
+    if (!inBagInit) {
+      inBagInit = true;
+      pendingBagInventory = {};
+    }
+    const baseId = bagMatch[1], count = parseInt(bagMatch[2]);
+    if (pendingBagInventory[baseId]) pendingBagInventory[baseId].count += count;
+    else pendingBagInventory[baseId] = { baseId, count };
+    return;
+  }
+
+  // Finalize inventory snapshot when BagMgr lines stop
+  if (inBagInit) {
+    events.push({ type: 'InventorySnapshot', items: Object.values(pendingBagInventory) });
+    inBagInit = false;
+    pendingBagInventory = {};
+  }
+
+  // ItemChange@ — individual item changes during gameplay
+  const itemChangeMatch = line.match(/\]GameLog:\sDisplay:\s\[Game\]\sItemChange@\s(.+)/);
+  if (itemChangeMatch) {
+    handleItemChange(itemChangeMatch[1].trim());
+    return;
+  }
+
+  // Socket message format (price checking)
+  const isMsgEnd = line.match(/.*(SendMessage|PushMessage|RecvMessage|RecvPushMsg)\sEnd.*/i);
   if (isMsgEnd) {
     if (!lastNotCompleteMsg) return;
-
     const msg = lastNotCompleteMsg;
     lastNotCompleteMsg = null;
     const rawData = msg.data.join('\n');
 
-    if (msg.action === 'PickItem') {
-      const parsed = parseTorchlightData(rawData);
-      events.push({ type: 'PickItem', data: parsed });
-
-    } else if (msg.action === 'PickItems') {
-      const parsed = parseTorchlightData(rawData);
-      events.push({ type: 'PickItems', data: parsed });
-
-    } else if (msg.action === 'ResetItemsLayout') {
-      // Triggered by sorting inventory or relog — gives us full inventory snapshot
-      const parsed = parseTorchlightData(rawData);
-      events.push({ type: 'InventorySnapshot', data: parsed });
-
-    } else if (msg.action === 'XchgSyncSearchPrice' && msg.type === 'SendMessage') {
+    if (msg.action === 'XchgSyncSearchPrice' && msg.type === 'SendMessage') {
       const parsed = parseTorchlightData(rawData);
       if (parsed.itemBaseId > 0) lastSearchPriceId = parsed.itemBaseId;
       events.push({ type: 'PriceSearchStart', itemId: lastSearchPriceId });
@@ -121,33 +123,22 @@ function routeLine(line) {
 
     } else if (msg.action === 'XchgSearchPrice' && msg.type === 'RecvMessage') {
       const parsed = parseTorchlightData(rawData);
-      // Extract prices in Fire currency (100300)
       const unitPrices = [];
       Object.values(parsed.prices || {}).forEach((p) => {
-        if (p.currency === '100300') {
+        if (p.currency == '100300') {
           Object.values(p.unitPrices || {}).forEach((v) => unitPrices.push(Number(v)));
         }
       });
-      const avg = unitPrices.length
-        ? (unitPrices.reduce((a, b) => a + b, 0) / unitPrices.length).toFixed(2)
-        : null;
-      events.push({ type: 'PriceResult', itemId: lastSearchPriceId, prices: unitPrices, avg });
+      events.push({ type: 'PriceResult', itemId: lastSearchPriceId, prices: unitPrices });
 
     } else if (msg.action === 'EnterArea' && msg.type === 'RecvMessage') {
       const parsed = parseTorchlightData(rawData);
       events.push({ type: 'EnterArea', areaId: parsed.areaId, mapId: parsed.mapId });
     }
-
   } else {
     const msgStart = line.match(msgStartReg);
     if (msgStart) {
-      lastNotCompleteMsg = {
-        start: timeToTimestamp(msgStart[1]),
-        type: msgStart[2],
-        action: msgStart[3].trim(),
-        synId: msgStart[4],
-        data: [],
-      };
+      lastNotCompleteMsg = { type: msgStart[2], action: msgStart[3].trim(), synId: msgStart[4], data: [] };
     } else if (lastNotCompleteMsg && !line.match(/errCode/) && !line.match(/^\[[^\]]+\].*GameLog.*/)) {
       lastNotCompleteMsg.data.push(line);
     }

@@ -8,47 +8,13 @@ const msgStartReg =
 let lastNotCompleteMsg = null
 let lastSearchPriceId = null
 
-// ItemChange@ inventory tracking
-let inInventoryReset = false
-let pendingInventory = {}
+// BagMgr@ inventory snapshot tracking
+// Format: BagMgr@:InitBagData PageId = X SlotId = Y ConfigBaseId = Z Num = W
+let inBagInit = false
+let pendingBagInventory = {}
 
 function handleItemChange(content) {
-  if (content === 'ProtoName=ResetItemsLayout start') {
-    inInventoryReset = true
-    pendingInventory = {}
-    return
-  }
-
-  if (inInventoryReset) {
-    if (content.startsWith('ProtoName=')) {
-      // New proto while collecting — finalize inventory
-      state.inventory = Object.values(pendingInventory)
-      state.hasInventory = true
-      inInventoryReset = false
-      pendingInventory = {}
-      // If it's another reset starting, handle it
-      if (content === 'ProtoName=ResetItemsLayout start') {
-        inInventoryReset = true
-        pendingInventory = {}
-      }
-      return
-    }
-
-    // Parse: Update Id=BASEID_uuid BagNum=COUNT in PageId=X SlotId=Y
-    const m = content.match(/^Update Id=(\d+)_\S+ BagNum=(\d+)/)
-    if (m) {
-      const baseId = m[1]
-      const count = parseInt(m[2])
-      if (pendingInventory[baseId]) {
-        pendingInventory[baseId].count += count
-      } else {
-        pendingInventory[baseId] = { baseId, count }
-      }
-    }
-    return
-  }
-
-  // Pick up item (not during a full reset)
+  // Individual item pickup during gameplay
   const addMatch = content.match(/^Add Id=(\d+)_\S+ BagNum=(\d+)/)
   if (addMatch) {
     addPickup([{ baseId: addMatch[1], count: parseInt(addMatch[2]) }])
@@ -80,19 +46,37 @@ function parseTorchlightData(textData) {
 function processLine(line) {
   state.isLogging = true
 
-  // ItemChange@ format (current TLI version — inventory tracking)
+  // BagMgr@:InitBagData — full inventory snapshot sent on login / area enter
+  // Format: ...BagMgr@:InitBagData PageId = X SlotId = Y ConfigBaseId = BASEID Num = COUNT
+  const bagMatch = line.match(/BagMgr@:InitBagData.*ConfigBaseId\s*=\s*(\d+)\s+Num\s*=\s*(\d+)/)
+  if (bagMatch) {
+    if (!inBagInit) {
+      inBagInit = true
+      pendingBagInventory = {}
+    }
+    const baseId = bagMatch[1]
+    const count = parseInt(bagMatch[2])
+    if (pendingBagInventory[baseId]) {
+      pendingBagInventory[baseId].count += count
+    } else {
+      pendingBagInventory[baseId] = { baseId, count }
+    }
+    return
+  }
+
+  // Finalize inventory snapshot when BagMgr lines stop
+  if (inBagInit) {
+    state.inventory = Object.values(pendingBagInventory)
+    state.hasInventory = true
+    inBagInit = false
+    pendingBagInventory = {}
+  }
+
+  // ItemChange@ — individual item changes during gameplay (pickups)
   const itemChangeMatch = line.match(/\]GameLog:\sDisplay:\s\[Game\]\sItemChange@\s(.+)/)
   if (itemChangeMatch) {
     handleItemChange(itemChangeMatch[1].trim())
     return
-  }
-
-  // If we were collecting inventory and now see a non-ItemChange line, finalize
-  if (inInventoryReset && Object.keys(pendingInventory).length > 0) {
-    state.inventory = Object.values(pendingInventory)
-    state.hasInventory = true
-    inInventoryReset = false
-    pendingInventory = {}
   }
 
   // Socket message format (price checking)
