@@ -1,45 +1,45 @@
 # TLI Tracker
 
-A farming tracker for **Torchlight: Infinite** that tracks item pickups, map runs, and in-game prices by reading the game's local log file.
+A real-time farming tracker for **Torchlight: Infinite** that reads the game's local log file to track map runs, item pickups, inventory value, and market activity.
 
-## Why does this exist?
+## Features
 
-The original tracker — [YiHuo ETor (易火-ETor)](https://etor-beta.710421059.xyz/), translated to English by GIBOo_ — was getting a blank window. The reason is that the original app is just an Electron shell that loads its UI from an external website at startup. If that site is unreachable, slow, or blocked on your machine, you get a transparent blank window with nothing to interact with.
-
-This project fixes that by keeping all the same log-reading logic but replacing the external URL with a locally bundled UI, so it works offline and doesn't depend on any third-party server being up.
-
-## Credit
-
-The vast majority of the meaningful code in this project is **not mine**. Specifically:
-
-- **`src/tor/main.js`** — the log file watcher and parser — is taken directly from the original YiHuo ETor application. This is the core of how the tracker works: it watches the game's `UE_game.log` file in real time and parses game events out of it.
-- The **Electron IPC and WebSocket architecture** in `electron/main.js` is also based closely on the original app's main process code.
-- The original YiHuo ETor was built by the Chinese developer community. The English translation was done by **GIBOo_**.
-
-I built the replacement frontend UI (`frontend/`) and wired it together so it loads locally instead of from the web.
+- **Map tracking** — detects map entries and exits, shows a list of all maps run this session with time spent per map
+- **Loot per map** — tracks items picked up during each map run and their FE value
+- **Map cost tracking** — detects items consumed when opening a map (beacons, compasses) and subtracts them from profit
+- **Net profit per map** — gross loot minus map cost, shown per map and for the full session
+- **FE/hr and FE/min** — based on time spent in maps only (excludes town time), with real-time rate shown as secondary
+- **Inventory networth** — live value of everything in your bag, sorted by value in the Loot tab
+- **Instant market updates** — inventory updates immediately when you list an item for sale or claim FE from a sale
+- **Market prices** — fetches live price data from titrack.ninja; also captures prices when you search the in-game exchange
+- **Session reset** — wipe the current session's map history without losing your inventory snapshot
 
 ## How it works
 
-Torchlight: Infinite (Unreal Engine) can write game events to a local log file when logging is enabled in settings. This tracker watches that file for changes and parses events like:
+Torchlight: Infinite (Unreal Engine) writes game events to a local log file when logging is enabled in settings. This tracker watches that file in real time and parses:
 
-- **Item pickups** (`PickItem`, `PickItems`)
-- **Map entry** (`EnterArea`)
-- **Inventory snapshots** (`ResetItemsLayout` — triggered by sorting your bag or relogging)
-- **Price data** (`XchgSearchPrice` — captured when you search prices in the in-game exchange)
+- `SwitchBattleAreaUtil:_JoinFightSuccess()` — map entry with area ID, map ID, and type
+- `ItemChange@ ProtoName=PickItems` — item pickups (delta from previous slot count)
+- `ItemChange@ ProtoName=Spv3Open` — items consumed opening a map (beacon/compass cost)
+- `ItemChange@ ProtoName=XchgForSale` — item listed on market (removed from inventory)
+- `ItemChange@ ProtoName=XchgReceive` — FE claimed from a sale (added to inventory)
+- `ItemChange@ ProtoName=ResetItemsLayout` — full inventory snapshot (on sort or relog)
+- `BagMgr@:InitBagData` — inventory snapshot on login
+- `XchgSearchPrice` socket messages — price data captured from in-game exchange searches
 
-No data is sent anywhere. Everything is local.
+No data is sent anywhere. Everything runs locally.
 
 ## Setup
 
 ### Requirements
 
-- Windows 10 or 11 (with WebView2 — included by default on Win 11, auto-installed on Win 10 via Windows Update)
-- Torchlight Infinite installed
+- Windows 10 or 11
+- Torchlight Infinite installed and logging enabled
 
 ### In-game setup
 
 1. Open TLI settings and enable **Logging**
-2. When you first start the tracker, either **sort your inventory** or **log out and back in** — this forces the game to write your current inventory state to the log so the tracker can pick it up
+2. When you first start the tracker, **sort your inventory** or **relog** — this forces the game to write your current inventory state so the tracker can pick it up
 
 ### Running the tracker
 
@@ -50,8 +50,8 @@ No data is sent anywhere. Everything is local.
    ```
    C:\Users\<you>\AppData\Local\[TLI folder]\TorchLight\Saved\Logs\UE_game.log
    ```
-   *(The exact path varies by install location — search for `UE_game.log` if unsure)*
-5. Start playing — the tracker will update in real time
+   *(The exact path varies by install — search for `UE_game.log` if unsure)*
+5. Start playing — the tracker updates in real time
 
 ## Development
 
@@ -67,9 +67,9 @@ npm run dev
 npm run build:win
 
 # Run log parser tests
-npm test
+node test/log-parser-test.js
 ```
 
-## License
+## Credit
 
-The original log parsing code (`src/tor/main.js`) belongs to the YiHuo ETor project and its developers. Everything else in this repo is provided as-is with no warranty.
+The log file watcher (`src/tor/main.js`) is based on the original [YiHuo ETor (易火-ETor)](https://etor-beta.710421059.xyz/) by the Chinese TLI developer community, English translation by GIBOo_. The rest of this project (frontend, Electron main process, log parsing logic) was built separately.
