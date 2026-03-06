@@ -1,7 +1,7 @@
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 
-// ── Log parsing (same logic as src/tor/main.js dealMsg) ───────────────────
+// ── Log parsing ────────────────────────────────────────────────────────────
 const msgStartReg =
   /\[([^\]]+)\]\[[^\]]+\]GameLog:\sDisplay:\s\[Game\]\s-+.*(SendMessage|PushMessage|RecvMessage|RecvPushMsg)\sSTT-+([^-]+)-+SynId\s=\s(\d*).*/i
 
@@ -10,12 +10,9 @@ let lastSearchPriceId = null
 
 function parseTorchlightData(textData) {
   const root = {}
-  const lines = textData
-    .trim()
-    .split('\n')
+  const lines = textData.trim().split('\n')
     .filter((l) => l.trim() && !l.trim().startsWith('+errCode'))
     .map((l) => l.trim())
-
   const lastKeys = []
   for (const line of lines) {
     let copyLine = line
@@ -34,8 +31,8 @@ function parseTorchlightData(textData) {
 }
 
 function processLine(line) {
+  state.isLogging = true
   const isMsgEnd = line.match(/.*(SendMessage|PushMessage|RecvMessage|RecvPushMsg)\sEnd.*/i)
-
   if (isMsgEnd) {
     if (!lastNotCompleteMsg) return
     const msg = lastNotCompleteMsg
@@ -59,89 +56,152 @@ function processLine(line) {
 function handleMessage(msg) {
   const rawData = msg.data.join('\n')
 
-  if (msg.action === 'PickItem' || msg.action === 'PickItems') {
-    const parsed = parseTorchlightData(rawData)
-    addPickup(parsed, msg.action)
+  if (msg.action === 'PickItem') {
+    const p = parseTorchlightData(rawData)
+    addPickup([{ baseId: p.baseId, count: Number(p.count) || 1 }])
+
+  } else if (msg.action === 'PickItems') {
+    const p = parseTorchlightData(rawData)
+    const items = Object.values(p.items ?? {})
+      .filter((i) => i.baseId)
+      .map((i) => ({ baseId: i.baseId, count: Number(i.count) || 1 }))
+    addPickup(items)
 
   } else if (msg.action === 'ResetItemsLayout') {
-    const parsed = parseTorchlightData(rawData)
-    state.inventorySnapshot = parsed
+    const p = parseTorchlightData(rawData)
+    // Flatten items object into array
+    state.inventory = Object.values(p.items ?? {})
+      .filter((i) => i.baseId)
+      .map((i) => ({ baseId: i.baseId, count: Number(i.count) || 1 }))
+    state.hasInventory = true
 
   } else if (msg.action === 'EnterArea' && msg.type === 'RecvMessage') {
-    const parsed = parseTorchlightData(rawData)
-    if (parsed.areaId) startNewMap(parsed.areaId, parsed.mapId)
+    const p = parseTorchlightData(rawData)
+    if (p.areaId) startNewMap(p.areaId, p.mapId, p.checkType)
 
   } else if (msg.action === 'XchgSyncSearchPrice' && msg.type === 'SendMessage') {
-    const parsed = parseTorchlightData(rawData)
-    if (parsed.itemBaseId > 0) lastSearchPriceId = parsed.itemBaseId
+    const p = parseTorchlightData(rawData)
+    if (p.itemBaseId > 0) lastSearchPriceId = p.itemBaseId
 
   } else if (msg.action === 'XchgSearchPrice' && msg.type === 'SendMessage') {
-    const parsed = parseTorchlightData(rawData)
-    lastSearchPriceId = parsed?.filters?.['1']?.refer
+    const p = parseTorchlightData(rawData)
+    lastSearchPriceId = p?.filters?.['1']?.refer
 
   } else if (msg.action === 'XchgSearchPrice' && msg.type === 'RecvMessage') {
-    const parsed = parseTorchlightData(rawData)
-    updatePrice(parsed, lastSearchPriceId)
+    updatePrice(parseTorchlightData(rawData), lastSearchPriceId)
   }
 }
 
 // ── State ──────────────────────────────────────────────────────────────────
 const state = reactive({
-  status: 'idle',        // idle | connecting | watching | error
+  status: 'idle',
   logPath: '',
-  currentMap: null,      // { areaId, mapId, startTime, pickups: [] }
-  mapHistory: [],        // array of completed maps
+  isLogging: false,      // true once first log line received
+  hasInventory: false,   // true once ResetItemsLayout received
+  inventory: [],         // [{ baseId, count }]
   prices: {},            // baseId → price
-  inventorySnapshot: null,
-  errorMsg: '',
+  basePriceIds: new Set(), // IDs from prices.json — only these get log price updates
+  priceNames: {},        // baseId → name (from titrack.ninja)
+  priceLastUpdated: null,
+  currentMap: null,      // { areaId, mapId, checkType, startTime, pickups: [] }
+  mapHistory: [],
+  sessionStart: null,
 })
 
-const sessionPickups = computed(() => {
-  const all = state.mapHistory.flatMap((m) => m.pickups)
-  if (state.currentMap) all.push(...state.currentMap.pickups)
-  return all
-})
-
-const sessionMapCount = computed(() => state.mapHistory.length + (state.currentMap ? 1 : 0))
-
-function startNewMap(areaId, mapId) {
-  if (state.currentMap) {
-    state.mapHistory.push({ ...state.currentMap })
-  }
-  state.currentMap = { areaId, mapId, startTime: Date.now(), pickups: [] }
+// ── Computed stats ─────────────────────────────────────────────────────────
+function itemValue(baseId, count) {
+  return (state.prices[baseId] ?? 0) * count
 }
 
-function addPickup(data, action) {
-  const target = state.currentMap ?? (state.currentMap = { areaId: 'unknown', mapId: null, startTime: Date.now(), pickups: [] })
-  if (action === 'PickItem') {
-    target.pickups.push({ baseId: data.baseId, count: Number(data.count) || 1 })
-  } else {
-    // PickItems — iterate items object
-    Object.values(data.items ?? {}).forEach((item) => {
-      if (item.baseId) target.pickups.push({ baseId: item.baseId, count: Number(item.count) || 1 })
-    })
+function mapProfit(map) {
+  return map.pickups.reduce((s, p) => s + itemValue(p.baseId, p.count), 0)
+}
+
+const networth = computed(() =>
+  state.inventory.reduce((s, i) => s + itemValue(i.baseId, i.count), 0)
+)
+
+const sessionProfit = computed(() => {
+  const maps = [...state.mapHistory, ...(state.currentMap ? [state.currentMap] : [])]
+  return maps.reduce((s, m) => s + mapProfit(m), 0)
+})
+
+const profitPerMin = computed(() => {
+  if (!state.sessionStart) return 0
+  const mins = (Date.now() - state.sessionStart) / 60000
+  return mins < 0.1 ? 0 : sessionProfit.value / mins
+})
+
+const logStatus = computed(() => {
+  if (state.status !== 'watching') return 'disconnected'
+  if (!state.isLogging) return 'waiting'
+  if (!state.hasInventory) return 'need-inventory'
+  return 'ok'
+})
+
+const allMaps = computed(() => {
+  const maps = []
+  if (state.currentMap) maps.push({ ...state.currentMap, live: true })
+  return maps.concat([...state.mapHistory].reverse())
+})
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function startNewMap(areaId, mapId, checkType) {
+  if (state.currentMap) state.mapHistory.push({ ...state.currentMap })
+  if (!state.sessionStart) state.sessionStart = Date.now()
+  state.currentMap = { areaId, mapId, checkType, startTime: Date.now(), pickups: [] }
+}
+
+function addPickup(items) {
+  if (!state.currentMap) {
+    state.currentMap = { areaId: 'unknown', mapId: null, checkType: null, startTime: Date.now(), pickups: [] }
+    if (!state.sessionStart) state.sessionStart = Date.now()
   }
+  state.currentMap.pickups.push(...items)
 }
 
 function updatePrice(data, itemId) {
   if (!itemId) return
+  // Only update price if this item is a known tradeable item from titrack.ninja
+  if (state.basePriceIds.size > 0 && !state.basePriceIds.has(String(itemId))) return
   const unitPrices = []
   Object.values(data.prices ?? {}).forEach((p) => {
-    if (p.currency === '100300') {
-      Object.values(p.unitPrices ?? {}).forEach((v) => unitPrices.push(Number(v)))
-    }
+    if (p.currency == '100300')
+      Object.values(p.unitPrices ?? {}).forEach((v) => unitPrices.push(v))
   })
-  if (unitPrices.length) {
-    const sorted = [...unitPrices].sort((a, b) => a - b)
-    state.prices[itemId] = sorted[Math.floor(sorted.length / 2)] // median
-  }
+  if (!unitPrices.length) return
+
+  // Group by rounded value, count occurrences — pick the mode (same as example)
+  const mergedPrices = unitPrices.reduce((acc, price) => {
+    const a = String(price).match(/(0\.0*).*/)
+    const fixNum = a ? a[1].length : 1
+    const key = `${Number(Number(price).toFixed(fixNum))}`
+    acc[key] = (acc[key] ?? 0) + 1
+    return acc
+  }, {})
+
+  const sortedPrices = Object.keys(mergedPrices).sort((a, b) => mergedPrices[b] - mergedPrices[a])
+  if (sortedPrices.length > 0) state.prices[itemId] = Number(sortedPrices[0])
+}
+
+function formatVal(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M'
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K'
+  return n.toFixed(1)
+}
+
+function mapLabel(map) {
+  if (map.mapId) return `Map ${map.mapId}`
+  const prefix = map.areaId?.split('_')[0]
+  return prefix ? `Area ${prefix}` : 'Unknown'
 }
 
 // ── Settings ───────────────────────────────────────────────────────────────
 const STORAGE_KEY = 'tli-game-dir'
+const activeTab = ref('overview')
 const showSettings = ref(false)
 const gameDir = ref(localStorage.getItem(STORAGE_KEY) ?? '')
-const findStatus = ref('')   // '', 'searching', 'found', 'not-found'
+const findStatus = ref('')
 
 async function pickDirectory() {
   if (!window.electronAPI) return
@@ -159,16 +219,19 @@ async function pickDirectory() {
   }
 }
 
+// ── Electron connection ────────────────────────────────────────────────────
+let ws = null
+let profitTimer = null
+
 async function startWatching(logPath) {
   state.logPath = logPath
   state.status = 'connecting'
   showSettings.value = false
   await window.electronAPI.startTorLog(logPath)
   await connectWebSocket()
+  // Tick every 30s to refresh profitPerMin display
+  profitTimer = setInterval(() => { state.sessionStart = state.sessionStart }, 30000)
 }
-
-// ── Electron connection ────────────────────────────────────────────────────
-let ws = null
 
 async function connectWebSocket() {
   if (!window.electronAPI) return
@@ -195,31 +258,78 @@ async function connectWebSocket() {
   ws.onclose = () => {
     ws = null
     if (state.status === 'watching') state.status = 'idle'
-    window.electronAPI?.onLogBatch((payload) => {
-      payload.messages?.forEach((line) => processLine(line))
-      window.electronAPI.sendIpcBatchProcessed(payload.batchId)
-    })
+    // IPC fallback — main process sends individual tor-log-msg events
+    window.electronAPI?.onLogMsg((line) => processLine(line))
+  }
+
+  ws.onerror = () => {
+    // Will trigger onclose which sets up IPC fallback
   }
 }
 
 async function stopTracking() {
-  if (!window.electronAPI) return
-  await window.electronAPI.stopTorLog()
+  await window.electronAPI?.stopTorLog()
   if (ws) { ws.close(); ws = null }
+  if (profitTimer) { clearInterval(profitTimer); profitTimer = null }
   state.status = 'idle'
+  state.isLogging = false
 }
 
 function resetSession() {
   state.currentMap = null
   state.mapHistory = []
+  state.sessionStart = null
+  state.isLogging = false
+  state.hasInventory = false
+  state.inventory = []
 }
 
-// Window controls
 const closeWindow = () => window.electronAPI?.closeWindow()
 const minimizeWindow = () => window.electronAPI?.minimizeWindow()
 
+// ── Pricing ────────────────────────────────────────────────────────────────
+const pricingLoading = ref(false)
+const pricingError = ref('')
+
+const pricingTableItems = computed(() => {
+  return Object.entries(state.priceNames)
+    .map(([id, name]) => ({ id, name, price: state.prices[id] ?? 0 }))
+    .sort((a, b) => b.price - a.price)
+})
+
+async function refreshPrices() {
+  if (pricingLoading.value) return
+  pricingLoading.value = true
+  pricingError.value = ''
+  try {
+    const result = await window.electronAPI.fetchPrices()
+    // Refresh wins — overwrite everything including any log-derived prices
+    state.prices = { ...result.prices }
+    state.basePriceIds = new Set(Object.keys(result.prices))
+    state.priceNames = result.names ?? {}
+    state.priceLastUpdated = result.lastUpdated
+  } catch (e) {
+    pricingError.value = e.message ?? 'Failed to fetch prices'
+  } finally {
+    pricingLoading.value = false
+  }
+}
+
+function formatDate(ts) {
+  if (!ts) return 'Never'
+  return new Date(ts).toLocaleString()
+}
+
 onMounted(async () => {
-  // Already watching (e.g. page reload)
+  // Load saved prices from file (gives baseline without hitting the site)
+  const saved = await window.electronAPI?.loadPrices()
+  if (saved?.prices) {
+    Object.assign(state.prices, saved.prices)
+    state.basePriceIds = new Set(Object.keys(saved.prices))
+    state.priceNames = saved.names ?? {}
+    state.priceLastUpdated = saved.lastUpdated
+  }
+
   const s = await window.electronAPI?.getTorStatus()
   if (s?.isLoggingActive) {
     state.logPath = s.currentLogPath
@@ -227,7 +337,6 @@ onMounted(async () => {
     await connectWebSocket()
     return
   }
-  // Saved directory — auto-find and start
   const savedDir = localStorage.getItem(STORAGE_KEY)
   if (savedDir && window.electronAPI) {
     findStatus.value = 'searching'
@@ -246,6 +355,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (ws) ws.close()
+  if (profitTimer) clearInterval(profitTimer)
 })
 </script>
 
@@ -261,103 +371,155 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Main content -->
-    <div class="content">
+    <!-- Body -->
+    <div class="body">
 
-      <!-- Settings overlay -->
-      <div v-if="showSettings" class="setup-panel">
-        <h2>TLI Tracker</h2>
-        <p class="hint">
-          Select your <strong>Torchlight Infinite</strong> game folder.<br>
-          The tracker will automatically find <code>UE_game.log</code> inside it.
-        </p>
-        <button class="btn btn--primary" @click="pickDirectory">
-          {{ gameDir ? 'Change Game Folder' : 'Select Game Folder' }}
-        </button>
-        <p v-if="gameDir" class="log-path">{{ gameDir }}</p>
-        <p v-if="findStatus === 'searching'" class="find-status">Searching…</p>
-        <p v-else-if="findStatus === 'not-found'" class="find-status find-status--error">
-          Could not find <code>UE_game.log</code> in that folder.<br>
-          Make sure <strong>Logging</strong> is enabled in TLI settings, then try again.
-        </p>
+      <!-- Sidebar tabs -->
+      <div class="sidebar">
         <button
-          v-if="state.status === 'watching' || state.logPath"
-          class="btn btn--small"
-          style="margin-top: 8px"
-          @click="showSettings = false"
-        >Back</button>
+          class="tab-btn"
+          :class="{ active: activeTab === 'overview' && !showSettings }"
+          @click="activeTab = 'overview'; showSettings = false"
+        >Overview</button>
+        <button
+          class="tab-btn"
+          :class="{ active: activeTab === 'pricing' && !showSettings }"
+          @click="activeTab = 'pricing'; showSettings = false"
+        >Pricing</button>
       </div>
 
-      <!-- Connecting -->
-      <div v-else-if="state.status === 'connecting'" class="setup-panel">
-        <p>Connecting…</p>
-      </div>
+      <!-- Main content -->
+      <div class="main">
 
-      <!-- Tracker dashboard -->
-      <div v-else class="dashboard">
-
-        <!-- Status bar -->
-        <div class="status-bar">
-          <span class="status-dot" :class="{ active: state.status === 'watching' }"></span>
-          <span class="status-text">{{ state.status === 'watching' ? 'Watching' : 'Idle' }}</span>
-          <span class="log-path-small">{{ state.logPath }}</span>
-          <div class="status-actions">
-            <button class="btn btn--small" @click="resetSession">Reset</button>
-            <button class="btn btn--small btn--danger" @click="stopTracking">Stop</button>
-          </div>
+        <!-- Settings overlay -->
+        <div v-if="showSettings" class="panel center-panel">
+          <h2>Settings</h2>
+          <p class="hint">
+            Select your <strong>Torchlight Infinite</strong> game folder.<br>
+            The tracker will automatically find <code>UE_game.log</code> inside it.
+          </p>
+          <button class="btn btn--primary" @click="pickDirectory">
+            {{ gameDir ? 'Change Game Folder' : 'Select Game Folder' }}
+          </button>
+          <p v-if="gameDir" class="small-path">{{ gameDir }}</p>
+          <p v-if="findStatus === 'searching'" class="find-msg">Searching…</p>
+          <p v-else-if="findStatus === 'not-found'" class="find-msg find-msg--error">
+            Could not find <code>UE_game.log</code>.<br>
+            Make sure <strong>Logging</strong> is enabled in TLI settings and try again.
+          </p>
+          <button
+            v-if="state.logPath"
+            class="btn btn--small"
+            style="margin-top: 8px"
+            @click="showSettings = false"
+          >Back</button>
         </div>
 
-        <!-- Stats row -->
-        <div class="stats-row">
-          <div class="stat-card">
-            <div class="stat-value">{{ sessionMapCount }}</div>
-            <div class="stat-label">Maps Run</div>
+        <!-- Overview tab -->
+        <div v-else-if="activeTab === 'overview'" class="panel">
+
+          <!-- Top stats -->
+          <div class="stats-row">
+            <div class="stat-card">
+              <div class="stat-label">Networth</div>
+              <div class="stat-value">{{ formatVal(networth) }} 🔥</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Profit</div>
+              <div class="stat-value">{{ formatVal(sessionProfit) }} 🔥</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Profit/Min</div>
+              <div class="stat-value">{{ formatVal(profitPerMin) }} 🔥</div>
+            </div>
           </div>
-          <div class="stat-card">
-            <div class="stat-value">{{ sessionPickups.length }}</div>
-            <div class="stat-label">Items Picked Up</div>
+
+          <!-- Log status notice -->
+          <div class="status-notice" :class="'status-notice--' + logStatus">
+            <span class="status-dot" :class="'dot--' + logStatus"></span>
+            <span v-if="logStatus === 'ok'">Tracking active</span>
+            <span v-else-if="logStatus === 'need-inventory'">
+              Sort your inventory or relog to get initial snapshot
+            </span>
+            <span v-else-if="logStatus === 'waiting'">
+              Waiting for log data — make sure <strong>Logging</strong> is enabled in TLI settings
+            </span>
+            <span v-else>Not connected —
+              <button class="link-btn" @click="showSettings = true">select game folder</button>
+            </span>
           </div>
-          <div class="stat-card">
-            <div class="stat-value">{{ state.currentMap?.areaId ?? '—' }}</div>
-            <div class="stat-label">Current Area</div>
+
+          <!-- Map list -->
+          <div class="map-list-header">
+            <span class="col-area">Area</span>
+            <span class="col-cost">Cost</span>
+            <span class="col-made">Made</span>
+            <span class="col-profit">Profit</span>
           </div>
+          <div class="map-list">
+            <div v-if="!allMaps.length" class="empty">No maps yet — enter a map in game.</div>
+            <div
+              v-for="(map, i) in allMaps"
+              :key="i"
+              class="map-row"
+              :class="{ 'map-row--live': map.live }"
+            >
+              <span class="col-area">
+                <span v-if="map.live" class="live-badge">LIVE</span>
+                {{ mapLabel(map) }}
+              </span>
+              <span class="col-cost muted">—</span>
+              <span class="col-made">{{ formatVal(mapProfit(map)) }}</span>
+              <span class="col-profit" :class="mapProfit(map) > 0 ? 'positive' : ''">
+                {{ formatVal(mapProfit(map)) }} 🔥
+              </span>
+            </div>
+          </div>
+
         </div>
 
-        <!-- Current map pickups -->
-        <div class="section">
-          <h3>Current Map</h3>
-          <div v-if="!state.currentMap" class="empty">No active map — enter a map in game.</div>
-          <div v-else>
-            <div class="pickup-list">
-              <div
-                v-for="(pickup, i) in state.currentMap.pickups"
-                :key="i"
-                class="pickup-row"
-              >
-                <span class="pickup-id">{{ pickup.baseId }}</span>
-                <span class="pickup-count">×{{ pickup.count }}</span>
-                <span v-if="state.prices[pickup.baseId]" class="pickup-price">
-                  {{ state.prices[pickup.baseId] }} 🔥
-                </span>
+        <!-- Pricing tab -->
+        <div v-else-if="activeTab === 'pricing'" class="panel">
+          <div class="pricing-header">
+            <div>
+              <div class="pricing-title">Market Prices</div>
+              <div class="pricing-meta">
+                Last updated: {{ formatDate(state.priceLastUpdated) }}
+                <span v-if="pricingTableItems.length"> &middot; {{ pricingTableItems.length }} items</span>
               </div>
             </div>
+            <button
+              class="btn btn--primary"
+              :disabled="pricingLoading"
+              @click="refreshPrices"
+            >{{ pricingLoading ? 'Fetching…' : 'Refresh Prices' }}</button>
           </div>
-        </div>
 
-        <!-- Map history -->
-        <div class="section">
-          <h3>Map History ({{ state.mapHistory.length }})</h3>
-          <div v-if="!state.mapHistory.length" class="empty">No completed maps yet.</div>
-          <div v-else class="history-list">
-            <div
-              v-for="(map, i) in [...state.mapHistory].reverse()"
-              :key="i"
-              class="history-row"
-            >
-              <span class="history-area">{{ map.areaId }}</span>
-              <span class="history-count">{{ map.pickups.length }} items</span>
-            </div>
+          <div v-if="pricingError" class="pricing-error">{{ pricingError }}</div>
+
+          <div v-if="pricingLoading" class="pricing-loading">
+            Fetching prices from titrack.ninja…
           </div>
+
+          <template v-else>
+            <div class="price-list-header">
+              <span class="col-name">Item</span>
+              <span class="col-price">Price (FE)</span>
+            </div>
+            <div class="price-list">
+              <div v-if="!pricingTableItems.length" class="empty">
+                No prices loaded — click Refresh Prices to fetch from titrack.ninja.
+              </div>
+              <div
+                v-for="item in pricingTableItems"
+                :key="item.id"
+                class="price-row"
+              >
+                <span class="col-name">{{ item.name }}</span>
+                <span class="col-price price-val">{{ item.price }} FE</span>
+              </div>
+            </div>
+          </template>
         </div>
 
       </div>
@@ -371,9 +533,8 @@ onUnmounted(() => {
   flex-direction: column;
   height: 100vh;
   background: radial-gradient(1200px 600px at 20% 10%, #1f2937 0%, #0f172a 50%, #05070a 100%);
-  border-radius: 8px;
   overflow: hidden;
-  border: 1px solid rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.06);
 }
 
 /* Title bar */
@@ -382,119 +543,156 @@ onUnmounted(() => {
   align-items: center;
   height: 36px;
   padding: 0 12px;
-  background: rgba(0,0,0,0.3);
+  background: rgba(0,0,0,0.35);
   flex-shrink: 0;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
 }
-.titlebar-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #9ca3af;
-  flex: 1;
-}
+.titlebar-title { font-size: 13px; font-weight: 600; color: #6b7280; flex: 1; }
 .titlebar-controls { display: flex; gap: 4px; }
 .tb-btn {
-  width: 28px;
-  height: 22px;
-  background: rgba(255,255,255,0.06);
-  border-radius: 4px;
-  color: #9ca3af;
-  font-size: 11px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 28px; height: 22px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 4px; color: #6b7280; font-size: 11px;
+  display: flex; align-items: center; justify-content: center;
   transition: background 0.15s;
 }
-.tb-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
+.tb-btn:hover { background: rgba(255,255,255,0.12); color: #e5e7eb; }
 .tb-btn--close:hover { background: #dc2626; color: #fff; }
 
-/* Content */
-.content { flex: 1; overflow-y: auto; padding: 20px; }
+/* Body layout */
+.body { display: flex; flex: 1; overflow: hidden; }
 
-/* Setup */
-.setup-panel {
+/* Sidebar */
+.sidebar {
+  width: 110px;
+  flex-shrink: 0;
+  background: rgba(0,0,0,0.2);
+  border-right: 1px solid rgba(255,255,255,0.05);
+  padding: 8px 6px;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  gap: 16px;
-  text-align: center;
+  gap: 2px;
 }
-.setup-panel h2 { font-size: 24px; color: #f9fafb; }
-.hint { color: #9ca3af; line-height: 1.6; }
-.hint strong { color: #e5e7eb; }
-.hint code { background: rgba(255,255,255,0.08); padding: 1px 6px; border-radius: 3px; }
-.log-path { font-size: 11px; color: #6b7280; word-break: break-all; max-width: 400px; }
-.find-status { font-size: 12px; color: #9ca3af; }
-.find-status--error { color: #f87171; line-height: 1.6; }
-.find-status--error code { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px; }
-
-/* Buttons */
-.btn {
-  padding: 8px 16px;
+.tab-btn {
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  background: transparent;
   border-radius: 6px;
+  color: #6b7280;
   font-size: 13px;
   font-weight: 500;
-  transition: background 0.15s;
+  transition: background 0.15s, color 0.15s;
 }
+.tab-btn:hover { background: rgba(255,255,255,0.06); color: #d1d5db; }
+.tab-btn.active { background: rgba(59,130,246,0.15); color: #93c5fd; }
+
+/* Main */
+.main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.panel { display: flex; flex-direction: column; height: 100%; padding: 16px; gap: 12px; overflow: hidden; }
+.center-panel { align-items: center; justify-content: center; text-align: center; }
+
+/* Settings panel */
+.center-panel h2 { font-size: 20px; color: #f9fafb; }
+.hint { color: #9ca3af; line-height: 1.6; font-size: 13px; }
+.hint strong { color: #e5e7eb; }
+.hint code { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+.small-path { font-size: 11px; color: #4b5563; word-break: break-all; max-width: 380px; }
+.find-msg { font-size: 12px; color: #9ca3af; }
+.find-msg--error { color: #f87171; line-height: 1.6; }
+.find-msg--error code { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px; }
+
+/* Buttons */
+.btn { padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500; transition: background 0.15s; font-family: inherit; cursor: pointer; border: none; }
 .btn--primary { background: #3b82f6; color: #fff; }
 .btn--primary:hover { background: #2563eb; }
 .btn--small { padding: 4px 10px; font-size: 12px; background: rgba(255,255,255,0.08); color: #d1d5db; }
 .btn--small:hover { background: rgba(255,255,255,0.14); }
-.btn--danger { color: #fca5a5; }
-.btn--danger:hover { background: rgba(220,38,38,0.3); }
+.link-btn { background: none; border: none; color: #60a5fa; cursor: pointer; font-size: inherit; padding: 0; text-decoration: underline; font-family: inherit; }
 
-/* Dashboard */
-.status-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 16px;
-  padding: 8px 12px;
-  background: rgba(0,0,0,0.2);
-  border-radius: 6px;
-}
-.status-dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  background: #4b5563;
-  flex-shrink: 0;
-}
-.status-dot.active { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
-.status-text { font-size: 12px; color: #9ca3af; }
-.log-path-small { font-size: 11px; color: #4b5563; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.status-actions { display: flex; gap: 6px; }
-
-.stats-row {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-  margin-bottom: 20px;
-}
+/* Stats row */
+.stats-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; flex-shrink: 0; }
 .stat-card {
   background: rgba(255,255,255,0.04);
   border: 1px solid rgba(255,255,255,0.06);
-  border-radius: 8px;
-  padding: 14px;
-  text-align: center;
+  border-radius: 8px; padding: 12px;
 }
-.stat-value { font-size: 22px; font-weight: 600; color: #f9fafb; }
-.stat-label { font-size: 11px; color: #6b7280; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.05em; }
+.stat-label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.stat-value { font-size: 18px; font-weight: 600; color: #f9fafb; }
 
-.section { margin-bottom: 20px; }
-.section h3 { font-size: 13px; font-weight: 600; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
-.empty { color: #4b5563; font-size: 13px; padding: 12px 0; }
+/* Status notice */
+.status-notice {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-radius: 6px; font-size: 12px;
+  flex-shrink: 0;
+}
+.status-notice--ok { background: rgba(34,197,94,0.1); color: #86efac; }
+.status-notice--waiting { background: rgba(234,179,8,0.1); color: #fde047; }
+.status-notice--need-inventory { background: rgba(251,191,36,0.1); color: #fcd34d; }
+.status-notice--disconnected { background: rgba(239,68,68,0.08); color: #fca5a5; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.dot--ok { background: #22c55e; box-shadow: 0 0 5px #22c55e88; }
+.dot--waiting { background: #eab308; }
+.dot--need-inventory { background: #f59e0b; }
+.dot--disconnected { background: #ef4444; }
 
-.pickup-list, .history-list { display: flex; flex-direction: column; gap: 2px; }
-.pickup-row, .history-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+/* Map list */
+.map-list-header {
+  display: grid;
+  grid-template-columns: 1fr 70px 80px 90px;
+  padding: 4px 10px;
+  font-size: 11px; color: #4b5563;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.map-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.map-row {
+  display: grid;
+  grid-template-columns: 1fr 70px 80px 90px;
+  padding: 8px 10px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 5px; font-size: 13px; color: #d1d5db;
+  border: 1px solid transparent;
+}
+.map-row--live { border-color: rgba(59,130,246,0.25); background: rgba(59,130,246,0.06); }
+.live-badge {
+  display: inline-block; font-size: 9px; font-weight: 700;
+  background: #3b82f6; color: #fff;
+  padding: 1px 4px; border-radius: 3px; margin-right: 5px; vertical-align: middle;
+}
+.col-area { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.col-cost, .col-made, .col-profit { text-align: right; }
+.muted { color: #4b5563; }
+.positive { color: #86efac; }
+.empty { color: #374151; font-size: 13px; padding: 16px 0; text-align: center; }
+
+/* Pricing tab */
+.pricing-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  flex-shrink: 0; gap: 12px;
+}
+.pricing-title { font-size: 15px; font-weight: 600; color: #f9fafb; }
+.pricing-meta { font-size: 11px; color: #4b5563; margin-top: 2px; }
+.pricing-error {
+  background: rgba(239,68,68,0.08); color: #f87171;
+  padding: 8px 12px; border-radius: 6px; font-size: 12px; flex-shrink: 0;
+}
+.pricing-loading { color: #6b7280; font-size: 13px; padding: 16px 0; text-align: center; flex-shrink: 0; }
+.price-list-header {
+  display: grid; grid-template-columns: 1fr 100px;
+  padding: 4px 10px;
+  font-size: 11px; color: #4b5563;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+.price-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.price-row {
+  display: grid; grid-template-columns: 1fr 100px;
   padding: 6px 10px;
   background: rgba(255,255,255,0.03);
-  border-radius: 4px;
-  font-size: 13px;
+  border-radius: 5px; font-size: 13px; color: #d1d5db;
 }
-.pickup-id, .history-area { flex: 1; color: #e5e7eb; font-family: monospace; }
-.pickup-count, .history-count { color: #6b7280; }
-.pickup-price { color: #fbbf24; font-weight: 600; }
+.col-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.col-price { text-align: right; }
+.price-val { color: #fbbf24; font-weight: 500; }
 </style>

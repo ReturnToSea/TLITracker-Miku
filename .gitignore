@@ -182,6 +182,7 @@ cython_debug/
 
 # TLI Tracker
 ExampleProject/
+ExampleProject2/
 dist-electron/
 node_modules/
 frontend/node_modules/

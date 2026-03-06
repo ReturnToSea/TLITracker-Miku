@@ -2,10 +2,84 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const os = require('os');
 const { exec } = require('child_process');
 const fs = require('fs').promises;
+const https = require('https');
 const path = require('path');
 const tor = require('../src/tor/main');
 const wss = require('ws');
 const net = require('net');
+
+const PRICES_FILE = path.join(__dirname, '..', 'prices.json');
+
+// Bracket-match to extract a JSON array after "key": in raw HTML.
+// Handles both plain JSON and Next.js RSC escaped format (\"key\":[...]).
+function extractJsonArray(html, key) {
+  // Try plain JSON first
+  let marker = `"${key}":[`;
+  let idx = html.indexOf(marker);
+  if (idx !== -1) {
+    return bracketExtract(html, idx + marker.length - 1, false);
+  }
+
+  // Try Next.js RSC escaped format: \"key\":[ where brackets are unescaped
+  // but string delimiters are \" instead of "
+  marker = `\\"${key}\\":[`;
+  idx = html.indexOf(marker);
+  if (idx !== -1) {
+    const raw = bracketExtract(html, idx + marker.length - 1, true);
+    if (raw) {
+      // Unescape: \" → "  and  \\ → \  and  \n → newline etc.
+      return raw
+        .replace(/\\\\"/g, '\u0001') // temporarily protect \\\" (escaped quote in value)
+        .replace(/\\"/g, '"')
+        .replace(/\u0001/g, '\\"')
+        .replace(/\\\\/g, '\\')
+        .replace(/\\n/g, '\n')
+        .replace(/\\t/g, '\t')
+        .replace(/\\r/g, '\r');
+    }
+  }
+
+  return null;
+}
+
+// Extract a JSON array starting at html[start] (which must be '[').
+// escaped=true: string delimiters are \" (backslash+quote) instead of "
+function bracketExtract(html, start, escaped) {
+  let depth = 0;
+  let j = start;
+  let inString = false;
+
+  while (j < html.length) {
+    const ch = html[j];
+
+    if (escaped) {
+      if (inString) {
+        if (ch === '\\' && j + 1 < html.length) {
+          // \" ends the string; any other \X is just an escape sequence
+          if (html[j + 1] === '"') { inString = false; j += 2; continue; }
+          j += 2; continue;
+        }
+      } else {
+        if (ch === '\\' && j + 1 < html.length && html[j + 1] === '"') {
+          inString = true; j += 2; continue;
+        }
+        if (ch === '[') depth++;
+        else if (ch === ']') { depth--; if (depth === 0) return html.slice(start, j + 1); }
+      }
+    } else {
+      if (inString) {
+        if (ch === '\\') { j++; } // skip escaped char
+        else if (ch === '"') { inString = false; }
+      } else {
+        if (ch === '"') { inString = true; }
+        else if (ch === '[') depth++;
+        else if (ch === ']') { depth--; if (depth === 0) return html.slice(start, j + 1); }
+      }
+    }
+    j++;
+  }
+  return null;
+}
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -407,6 +481,64 @@ app.whenReady().then(() => {
     });
     if (url) await win.loadURL(url);
     return win.id;
+  });
+
+  ipcMain.handle('fetch-prices', async () => {
+    const html = await new Promise((resolve, reject) => {
+      const req = https.get('https://titrack.ninja', {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => resolve(data));
+      });
+      req.on('error', reject);
+      req.setTimeout(20000, () => { req.destroy(); reject(new Error('Request timed out')); });
+    });
+
+    // Debug: check if allItems appears in raw HTML at all
+    const rawIdx = html.indexOf('"allItems"');
+    console.log('[fetch-prices] HTML size:', html.length, 'allItems index:', rawIdx);
+    if (rawIdx !== -1) console.log('[fetch-prices] Context:', html.slice(rawIdx, rawIdx + 100));
+
+    const allItemsJson = extractJsonArray(html, 'allItems');
+    if (!allItemsJson) throw new Error('Could not find allItems in page — titrack.ninja may be temporarily unavailable');
+
+    let allItems;
+    try { allItems = JSON.parse(allItemsJson); }
+    catch (e) { throw new Error('Failed to parse price data: ' + e.message); }
+
+    if (!Array.isArray(allItems) || allItems.length === 0) {
+      throw new Error('Price data is empty — titrack.ninja may be temporarily unavailable, try again later');
+    }
+
+    const prices = {};
+    const names = {};
+    for (const item of allItems) {
+      const id = item.config_base_id ?? item.configBaseId ?? item.itemId ?? item.id;
+      const price = item.price_fe_median ?? item.priceFe ?? item.price_fe ?? item.currentPrice ?? item.price;
+      if (id != null && price != null) {
+        prices[String(id)] = Number(price);
+        if (item.name) names[String(id)] = item.name;
+      }
+    }
+
+    if (Object.keys(prices).length === 0) {
+      throw new Error('Could not extract prices from data — field names may have changed');
+    }
+
+    const result = { prices, names, lastUpdated: Date.now(), count: Object.keys(prices).length };
+    await fs.writeFile(PRICES_FILE, JSON.stringify(result, null, 2), 'utf-8');
+    return result;
+  });
+
+  ipcMain.handle('load-prices', async () => {
+    try {
+      const raw = await fs.readFile(PRICES_FILE, 'utf-8');
+      return JSON.parse(raw);
+    } catch (_) {
+      return null;
+    }
   });
 });
 

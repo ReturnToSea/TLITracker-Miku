@@ -77,4 +77,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Translation: save untranslated texts
   saveUntranslated: (data) => ipcRenderer.send('save-untranslated', data),
+
+  // Pricing
+  fetchPrices: () => ipcRenderer.invoke('fetch-prices'),
+  loadPrices: () => ipcRenderer.invoke('load-prices'),
 });
