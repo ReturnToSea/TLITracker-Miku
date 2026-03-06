@@ -8,6 +8,53 @@ const msgStartReg =
 let lastNotCompleteMsg = null
 let lastSearchPriceId = null
 
+// ItemChange@ inventory tracking
+let inInventoryReset = false
+let pendingInventory = {}
+
+function handleItemChange(content) {
+  if (content === 'ProtoName=ResetItemsLayout start') {
+    inInventoryReset = true
+    pendingInventory = {}
+    return
+  }
+
+  if (inInventoryReset) {
+    if (content.startsWith('ProtoName=')) {
+      // New proto while collecting — finalize inventory
+      state.inventory = Object.values(pendingInventory)
+      state.hasInventory = true
+      inInventoryReset = false
+      pendingInventory = {}
+      // If it's another reset starting, handle it
+      if (content === 'ProtoName=ResetItemsLayout start') {
+        inInventoryReset = true
+        pendingInventory = {}
+      }
+      return
+    }
+
+    // Parse: Update Id=BASEID_uuid BagNum=COUNT in PageId=X SlotId=Y
+    const m = content.match(/^Update Id=(\d+)_\S+ BagNum=(\d+)/)
+    if (m) {
+      const baseId = m[1]
+      const count = parseInt(m[2])
+      if (pendingInventory[baseId]) {
+        pendingInventory[baseId].count += count
+      } else {
+        pendingInventory[baseId] = { baseId, count }
+      }
+    }
+    return
+  }
+
+  // Pick up item (not during a full reset)
+  const addMatch = content.match(/^Add Id=(\d+)_\S+ BagNum=(\d+)/)
+  if (addMatch) {
+    addPickup([{ baseId: addMatch[1], count: parseInt(addMatch[2]) }])
+  }
+}
+
 function parseTorchlightData(textData) {
   const root = {}
   const lines = textData.trim().split('\n')
@@ -32,6 +79,23 @@ function parseTorchlightData(textData) {
 
 function processLine(line) {
   state.isLogging = true
+
+  // ItemChange@ format (current TLI version — inventory tracking)
+  const itemChangeMatch = line.match(/\]GameLog:\sDisplay:\s\[Game\]\sItemChange@\s(.+)/)
+  if (itemChangeMatch) {
+    handleItemChange(itemChangeMatch[1].trim())
+    return
+  }
+
+  // If we were collecting inventory and now see a non-ItemChange line, finalize
+  if (inInventoryReset && Object.keys(pendingInventory).length > 0) {
+    state.inventory = Object.values(pendingInventory)
+    state.hasInventory = true
+    inInventoryReset = false
+    pendingInventory = {}
+  }
+
+  // Socket message format (price checking)
   const isMsgEnd = line.match(/.*(SendMessage|PushMessage|RecvMessage|RecvPushMsg)\sEnd.*/i)
   if (isMsgEnd) {
     if (!lastNotCompleteMsg) return
