@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 
 // ── Log parsing ────────────────────────────────────────────────────────────
 const msgStartReg =
@@ -286,6 +286,7 @@ const state = reactive({
   mapHistory: [],
   sessionStart: null,
   marketLog: [],         // [{ type: 'listed'|'claimed'|'bought', baseId, count, time }]
+  sessionHistory: [],    // saved past sessions loaded from disk
 })
 
 // ── Computed stats ─────────────────────────────────────────────────────────
@@ -511,6 +512,84 @@ function mapLabel(map) {
   return prefix ? `Area ${prefix}` : 'Unknown'
 }
 
+// ── Session history ────────────────────────────────────────────────────────
+const selectedHistorySessionId = ref(null)
+const selectedHistoryMapTime = ref(null)
+const historyLootMode = ref('loot')
+
+function consolidateItems(items) {
+  const grouped = {}
+  items.forEach(p => {
+    if (!grouped[p.baseId]) grouped[p.baseId] = { baseId: p.baseId, count: 0 }
+    grouped[p.baseId].count += p.count
+  })
+  return Object.values(grouped)
+}
+
+function sessionStats(session) {
+  const maps = session.maps
+  const profit = maps.reduce((s, m) => s + mapProfit(m), 0)
+  const mapMs = maps.reduce((s, m) => s + (m.endTime - m.startTime), 0)
+  const feHr = mapMs > 6000 ? profit / (mapMs / 3600000) : 0
+  const best = maps.length ? maps.reduce((b, m) => mapProfit(m) > mapProfit(b) ? m : b, maps[0]) : null
+  return { profit, mapMs, feHr, best, count: maps.length }
+}
+
+function finalizeSession() {
+  const maps = [
+    ...state.mapHistory,
+    ...(state.currentMap ? [{ ...state.currentMap, endTime: Date.now() }] : [])
+  ]
+  if (!maps.length || !state.sessionStart) return
+  const session = {
+    id: state.sessionStart,
+    startTime: state.sessionStart,
+    endTime: Date.now(),
+    maps: maps.map(m => ({
+      areaId: m.areaId, mapId: m.mapId, checkType: m.checkType,
+      spAreaId: m.spAreaId, spAreaLevel: m.spAreaLevel,
+      startTime: m.startTime, endTime: m.endTime ?? Date.now(),
+      pickups: consolidateItems(m.pickups),
+      costs: consolidateItems(m.costs ?? []),
+    }))
+  }
+  state.sessionHistory.unshift(session)
+  window.electronAPI?.saveSessions(state.sessionHistory)
+}
+
+function deleteHistorySession(id) {
+  state.sessionHistory = state.sessionHistory.filter(s => s.id !== id)
+  if (selectedHistorySessionId.value === id) {
+    selectedHistorySessionId.value = null
+    selectedHistoryMapTime.value = null
+  }
+  window.electronAPI?.saveSessions(state.sessionHistory)
+}
+
+const historyLootPanelItems = computed(() => {
+  const session = state.sessionHistory.find(s => s.id === selectedHistorySessionId.value)
+  if (!session) return []
+  let maps = session.maps
+  if (selectedHistoryMapTime.value != null) {
+    const m = maps.find(m => m.startTime === selectedHistoryMapTime.value)
+    maps = m ? [m] : []
+  }
+  const raw = []
+  if (historyLootMode.value === 'cost') {
+    maps.forEach(m => raw.push(...(m.costs ?? [])))
+  } else {
+    maps.forEach(m => raw.push(...m.pickups))
+  }
+  const grouped = {}
+  raw.forEach(p => {
+    if (!grouped[p.baseId]) grouped[p.baseId] = { baseId: p.baseId, count: 0 }
+    grouped[p.baseId].count += p.count
+  })
+  return Object.values(grouped)
+    .map(p => ({ ...p, value: itemValue(p.baseId, p.count), name: state.priceNames[p.baseId] ?? (p.baseId === FE_BASE_ID ? 'Flame Elementium' : `#${p.baseId}`) }))
+    .sort((a, b) => b.value - a.value)
+})
+
 // ── Auto updater ───────────────────────────────────────────────────────────
 // update state: null | 'available' | 'downloading' | 'ready' | 'error' | 'checking' | 'up-to-date'
 const updateState = ref(null)
@@ -565,6 +644,29 @@ const lootContentMode = ref('loot')    // 'loot' | 'cost' — what the panel sho
 const rateMode = ref('hr')             // 'hr' | 'min' — FE rate card toggle
 const selectedMapTime = ref(null)      // startTime of map clicked in list; null = auto (current/last)
 const selectedInventoryCategory = ref('All')
+
+// ── Theming ────────────────────────────────────────────────────────────────
+const theme = ref(localStorage.getItem('tli-theme') ?? 'dark')
+const customBgUrl = ref(localStorage.getItem('tli-custom-bg') ?? '')
+watch(theme, val => localStorage.setItem('tli-theme', val))
+watch(customBgUrl, val => localStorage.setItem('tli-custom-bg', val))
+
+const MIKU_BG = 'https://i.redd.it/tub3qyte92781.jpg'
+
+const appStyle = computed(() => {
+  if (theme.value === 'miku') {
+    return { backgroundImage: `url(${MIKU_BG})`, backgroundSize: 'cover', backgroundPosition: 'center' }
+  }
+  if (theme.value === 'custom' && customBgUrl.value) {
+    return { backgroundImage: `url(${customBgUrl.value})`, backgroundSize: 'cover', backgroundPosition: 'center' }
+  }
+  return {}
+})
+
+async function pickBgImage() {
+  const filePath = await window.electronAPI?.openImageDialog()
+  if (filePath) customBgUrl.value = `file://${filePath}`
+}
 
 async function pickLogFile() {
   if (!window.electronAPI) return
@@ -632,6 +734,7 @@ async function stopTracking() {
 }
 
 function resetSession() {
+  finalizeSession()
   state.currentMap = null
   state.mapHistory = []
   state.sessionStart = null
@@ -687,6 +790,15 @@ function marketItemName(baseId) {
 onMounted(async () => {
   setupUpdaterListeners()
 
+  // Save session on app close (if there's meaningful data)
+  window.electronAPI?.onWindowClose(() => {
+    if (state.mapHistory.length > 0 || state.currentMap) finalizeSession()
+  })
+
+  // Load session history from disk
+  const savedSessions = await window.electronAPI?.loadSessions()
+  if (savedSessions?.length) state.sessionHistory = savedSessions
+
   // Load saved prices from file (gives baseline without hitting the site)
   const saved = await window.electronAPI?.loadPrices()
   if (saved?.prices) {
@@ -722,7 +834,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app">
+  <div class="app" :data-theme="theme" :style="appStyle">
     <!-- Title bar -->
     <div class="titlebar" style="-webkit-app-region: drag">
       <span class="titlebar-title">TLI Tracker</span>
@@ -786,6 +898,11 @@ onUnmounted(() => {
           :class="{ active: activeTab === 'market' }"
           @click="activeTab = 'market'"
         >Market</button>
+        <button
+          class="tab-btn"
+          :class="{ active: activeTab === 'history' }"
+          @click="activeTab = 'history'"
+        >History</button>
         <button
           class="tab-btn"
           :class="{ active: activeTab === 'pricing' }"
@@ -996,6 +1113,96 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <!-- History tab -->
+        <div v-else-if="activeTab === 'history'" class="panel">
+          <div class="pricing-header">
+            <div>
+              <div class="pricing-title">Session History</div>
+              <div class="pricing-meta">{{ state.sessionHistory.length }} sessions saved</div>
+            </div>
+            <button class="btn btn--small" :disabled="!state.sessionHistory.length" @click="state.sessionHistory = []; window.electronAPI?.saveSessions([])">Clear All</button>
+          </div>
+
+          <div class="price-list">
+            <div v-if="!state.sessionHistory.length" class="empty">
+              No sessions saved yet — sessions are saved when you reset or close the app.
+            </div>
+
+            <template v-for="session in state.sessionHistory" :key="session.id">
+              <!-- Session header row -->
+              <div
+                class="history-session-row"
+                :class="{ 'history-session-row--active': selectedHistorySessionId === session.id }"
+                @click="selectedHistorySessionId = selectedHistorySessionId === session.id ? null : session.id; selectedHistoryMapTime = null"
+              >
+                <div class="history-session-main">
+                  <span class="history-session-date">{{ formatDate(session.startTime) }}</span>
+                  <span class="history-session-stats">
+                    {{ sessionStats(session).count }} maps ·
+                    {{ formatVal(sessionStats(session).profit) }} 🔥 ·
+                    {{ formatVal(sessionStats(session).feHr) }} 🔥/hr ·
+                    {{ fmtDuration(session.endTime - session.startTime) }} played
+                  </span>
+                </div>
+                <button class="history-delete-btn" @click.stop="deleteHistorySession(session.id)">✕</button>
+              </div>
+
+              <!-- Expanded: map list + loot panel -->
+              <div v-if="selectedHistorySessionId === session.id" class="history-expanded">
+                <div class="map-loot-area">
+                  <div class="map-list-section">
+                    <div class="map-list-header">
+                      <span class="col-area">Area</span>
+                      <span class="col-gross">Gross</span>
+                      <span class="col-cost">Cost</span>
+                      <span class="col-profit">Profit</span>
+                      <span class="col-time">Time</span>
+                    </div>
+                    <div class="map-list">
+                      <div
+                        v-for="map in [...session.maps].reverse()"
+                        :key="map.startTime"
+                        class="map-row"
+                        :class="{ 'map-row--selected': selectedHistoryMapTime === map.startTime, 'map-row--best': sessionStats(session).best?.startTime === map.startTime && session.maps.length > 1 }"
+                        @click="selectedHistoryMapTime = map.startTime; historyLootMode = 'loot'"
+                      >
+                        <span class="col-area">{{ mapLabel(map) }}</span>
+                        <span class="col-gross muted">{{ formatVal(mapGross(map)) }}</span>
+                        <span class="col-cost cost-val">{{ mapCost(map) > 0 ? formatVal(mapCost(map)) : '—' }}</span>
+                        <span class="col-profit" :class="mapProfit(map) >= 0 ? 'positive' : 'negative'">{{ formatVal(mapProfit(map)) }} 🔥</span>
+                        <span class="col-time muted">{{ fmtDuration(map.endTime - map.startTime) }}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="loot-panel">
+                    <div class="loot-panel-header">
+                      <div class="loot-toggle">
+                        <button class="loot-toggle-btn" :class="{ active: historyLootMode === 'loot' }" @click="historyLootMode = 'loot'">Loot</button>
+                        <button class="loot-toggle-btn" :class="{ active: historyLootMode === 'cost' }" @click="historyLootMode = 'cost'">Cost</button>
+                      </div>
+                      <div class="loot-toggle">
+                        <button class="loot-toggle-btn" :class="{ active: selectedHistoryMapTime === null }" @click="selectedHistoryMapTime = null">Session</button>
+                        <button class="loot-toggle-btn" :class="{ active: selectedHistoryMapTime !== null }" disabled>Map</button>
+                      </div>
+                    </div>
+                    <div class="loot-list">
+                      <div v-if="!historyLootPanelItems.length" class="empty loot-empty">
+                        {{ historyLootMode === 'cost' ? 'No cost items.' : selectedHistoryMapTime ? 'Click a map to see loot.' : 'No loot recorded.' }}
+                      </div>
+                      <div v-for="item in historyLootPanelItems" :key="item.baseId" class="loot-row">
+                        <span class="loot-name">{{ item.name }}</span>
+                        <span class="loot-count muted">×{{ item.count }}</span>
+                        <span class="loot-val" :class="historyLootMode === 'cost' ? 'cost-val' : ''">{{ formatVal(item.value) }} 🔥</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
         <!-- Settings tab -->
         <div v-else-if="activeTab === 'settings'" class="panel center-panel">
           <h2>Settings</h2>
@@ -1016,6 +1223,28 @@ onUnmounted(() => {
 
           <div class="settings-divider"></div>
 
+          <!-- Theme selector -->
+          <div class="theme-label">Theme</div>
+          <div class="theme-options">
+            <button
+              v-for="t in [{ id: 'dark', label: 'Midnight' }, { id: 'light', label: 'Light' }, { id: 'miku', label: 'Miku' }, { id: 'custom', label: 'Custom' }]"
+              :key="t.id"
+              class="theme-btn"
+              :class="['theme-btn--' + t.id, { active: theme === t.id }]"
+              @click="theme = t.id"
+            >{{ t.label }}</button>
+          </div>
+          <div v-if="theme === 'custom'" class="custom-bg-row">
+            <input
+              class="custom-bg-input"
+              v-model="customBgUrl"
+              placeholder="https://… or click Browse"
+            />
+            <button class="btn btn--small" @click="pickBgImage">Browse</button>
+          </div>
+
+          <div class="settings-divider"></div>
+
           <button
             class="btn btn--small"
             :disabled="updateState === 'checking' || updateState === 'downloading'"
@@ -1027,19 +1256,25 @@ onUnmounted(() => {
 
         <!-- Pricing tab -->
         <div v-else-if="activeTab === 'pricing'" class="panel">
-          <div class="pricing-header">
-            <div>
-              <div class="pricing-title">Market Prices</div>
-              <div class="pricing-meta">
-                Last updated: {{ formatDate(state.priceLastUpdated) }}
-                <span v-if="pricingTableItems.length"> &middot; {{ pricingTableItems.length }} items</span>
+          <div class="pricing-card">
+            <div class="pricing-header">
+              <div>
+                <div class="pricing-title">Market Prices</div>
+                <div class="pricing-meta">
+                  Last updated: {{ formatDate(state.priceLastUpdated) }}
+                  <span v-if="pricingTableItems.length"> &middot; {{ pricingTableItems.length }} items</span>
+                </div>
               </div>
+              <button
+                class="btn btn--primary"
+                :disabled="pricingLoading"
+                @click="refreshPrices"
+              >{{ pricingLoading ? 'Fetching…' : 'Refresh Prices' }}</button>
             </div>
-            <button
-              class="btn btn--primary"
-              :disabled="pricingLoading"
-              @click="refreshPrices"
-            >{{ pricingLoading ? 'Fetching…' : 'Refresh Prices' }}</button>
+            <div v-if="!pricingLoading" class="price-list-header">
+              <span class="col-name">Item</span>
+              <span class="col-price">Price (FE)</span>
+            </div>
           </div>
 
           <div v-if="pricingError" class="pricing-error">{{ pricingError }}</div>
@@ -1048,25 +1283,19 @@ onUnmounted(() => {
             Fetching prices from titrack.ninja…
           </div>
 
-          <template v-else>
-            <div class="price-list-header">
-              <span class="col-name">Item</span>
-              <span class="col-price">Price (FE)</span>
+          <div v-else class="price-list">
+            <div v-if="!pricingTableItems.length" class="empty">
+              No prices loaded — click Refresh Prices to fetch from titrack.ninja.
             </div>
-            <div class="price-list">
-              <div v-if="!pricingTableItems.length" class="empty">
-                No prices loaded — click Refresh Prices to fetch from titrack.ninja.
-              </div>
-              <div
-                v-for="item in pricingTableItems"
-                :key="item.id"
-                class="price-row"
-              >
-                <span class="col-name">{{ item.name }}</span>
-                <span class="col-price price-val">{{ item.price }} FE</span>
-              </div>
+            <div
+              v-for="item in pricingTableItems"
+              :key="item.id"
+              class="price-row"
+            >
+              <span class="col-name">{{ item.name }}</span>
+              <span class="col-price price-val">{{ item.price }} FE</span>
             </div>
-          </template>
+          </div>
         </div>
 
       </div>
@@ -1200,7 +1429,12 @@ onUnmounted(() => {
 .dot--disconnected { background: #ef4444; }
 
 /* Timers */
-.timers-row { display: flex; gap: 20px; flex-shrink: 0; }
+.timers-row {
+  display: flex; gap: 20px; flex-shrink: 0;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 8px; padding: 10px 14px;
+}
 .timer-item { display: flex; flex-direction: column; }
 .timer-label { font-size: 10px; color: #4b5563; text-transform: uppercase; letter-spacing: 0.05em; }
 .timer-val { font-size: 15px; font-weight: 600; color: #d1d5db; font-variant-numeric: tabular-nums; }
@@ -1213,10 +1447,14 @@ onUnmounted(() => {
 .map-list-header {
   display: grid;
   grid-template-columns: 1fr 65px 60px 75px 55px;
-  padding: 4px 10px;
+  padding: 6px 10px;
   font-size: 11px; color: #4b5563;
   text-transform: uppercase; letter-spacing: 0.04em;
   flex-shrink: 0;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: 6px;
+  margin-bottom: 4px;
 }
 .map-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
 .map-row {
@@ -1293,9 +1531,10 @@ onUnmounted(() => {
 .inv-grid { grid-template-columns: 1fr 50px 70px 80px !important; }
 
 /* Pricing tab */
+.pricing-card { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
 .pricing-header {
   display: flex; align-items: flex-start; justify-content: space-between;
-  flex-shrink: 0; gap: 12px;
+  gap: 12px;
 }
 .pricing-title { font-size: 15px; font-weight: 600; color: #f9fafb; }
 .pricing-meta { font-size: 11px; color: #4b5563; margin-top: 2px; }
@@ -1321,6 +1560,24 @@ onUnmounted(() => {
 .col-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .col-price { text-align: right; }
 .price-val { color: #fbbf24; font-weight: 500; }
+
+/* ── History tab ── */
+.history-session-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 10px; border-radius: 6px; cursor: pointer;
+  border: 1px solid transparent;
+}
+.history-session-row:hover { background: rgba(255,255,255,0.04); }
+.history-session-row--active { background: rgba(59,130,246,0.08); border-color: rgba(59,130,246,0.2); }
+.history-session-main { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+.history-session-date { font-size: 12px; font-weight: 600; color: #d1d5db; }
+.history-session-stats { font-size: 11px; color: #6b7280; }
+.history-delete-btn {
+  background: none; border: none; color: #4b5563; cursor: pointer;
+  font-size: 12px; padding: 4px 6px; border-radius: 4px; flex-shrink: 0;
+}
+.history-delete-btn:hover { color: #f87171; background: rgba(239,68,68,0.1); }
+.history-expanded { padding: 4px 0 8px; }
 
 /* ── Market tab ── */
 .market-row {
@@ -1363,5 +1620,114 @@ onUnmounted(() => {
   margin-top: 8px; height: 4px; background: #374151; border-radius: 2px; overflow: hidden;
 }
 .update-progress-fill { height: 100%; background: #3b82f6; transition: width 0.3s ease; }
-.settings-divider { height: 1px; background: #1f2937; margin: 8px 0; }
+.settings-divider { height: 1px; background: rgba(255,255,255,0.06); margin: 8px 0; }
+
+/* ── Theme selector ── */
+.theme-label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+.theme-options { display: flex; gap: 8px; }
+.theme-btn {
+  flex: 1; padding: 8px; border-radius: 8px; font-size: 12px; font-weight: 500;
+  border: 1px solid rgba(255,255,255,0.08); cursor: pointer; font-family: inherit;
+  transition: all 0.15s;
+}
+.theme-btn--dark  { background: #1f2937; color: #9ca3af; }
+.theme-btn--light { background: #f3f4f6; color: #374151; border-color: #e5e7eb; }
+.theme-btn--miku   { background: linear-gradient(135deg, #f9a8d4, #86efac); color: #1f2937; }
+.theme-btn--custom { background: linear-gradient(135deg, #1e3a5f, #2d1b69); color: #c4b5fd; }
+.theme-btn.active { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.3); }
+.custom-bg-row { display: flex; gap: 8px; margin-top: 8px; width: 100%; }
+.custom-bg-input {
+  flex: 1; padding: 5px 10px; border-radius: 6px; font-size: 12px;
+  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+  color: #d1d5db; font-family: inherit; outline: none; min-width: 0;
+}
+.custom-bg-input::placeholder { color: #4b5563; }
+.custom-bg-input:focus { border-color: #3b82f6; }
+
+/* ── Light theme overrides ── */
+.app[data-theme="light"] {
+  background: #f0f0f0;
+}
+[data-theme="light"] .stat-card { background: rgba(0,0,0,0.08); border-color: rgba(0,0,0,0.12); }
+[data-theme="light"] .stat-label { color: #9ca3af; }
+[data-theme="light"] .stat-value { color: #111827; }
+[data-theme="light"] .map-row { background: rgba(0,0,0,0.03); color: #374151; }
+[data-theme="light"] .map-row:hover { background: rgba(0,0,0,0.06); }
+[data-theme="light"] .map-list-header { color: #9ca3af; }
+[data-theme="light"] .muted { color: #9ca3af; }
+[data-theme="light"] .empty { color: #9ca3af; }
+[data-theme="light"] .positive { color: #16a34a; }
+[data-theme="light"] .loot-val { color: #b45309; }
+[data-theme="light"] .price-val { color: #b45309; }
+[data-theme="light"] .loot-panel { background: rgba(0,0,0,0.03); border-color: rgba(0,0,0,0.08); }
+[data-theme="light"] .map-list-header { background: rgba(0,0,0,0.06); border-color: rgba(0,0,0,0.08); }
+[data-theme="light"] .timers-row { background: rgba(0,0,0,0.04); border-color: rgba(0,0,0,0.08); }
+[data-theme="light"] .loot-panel-header { border-color: rgba(0,0,0,0.08); }
+[data-theme="light"] .loot-toggle-btn { color: #9ca3af; }
+[data-theme="light"] .loot-toggle-btn:hover { background: rgba(0,0,0,0.06); color: #374151; }
+[data-theme="light"] .loot-row { background: rgba(0,0,0,0.02); color: #374151; }
+[data-theme="light"] .price-row { background: rgba(0,0,0,0.03); color: #374151; }
+[data-theme="light"] .price-list-header { color: #9ca3af; }
+[data-theme="light"] .pricing-title { color: #111827; }
+[data-theme="light"] .pricing-meta { color: #9ca3af; }
+[data-theme="light"] .tab-btn { color: #9ca3af; }
+[data-theme="light"] .tab-btn:hover { background: rgba(0,0,0,0.06); color: #374151; }
+[data-theme="light"] .tab-btn.active { background: rgba(59,130,246,0.12); color: #1d4ed8; }
+[data-theme="light"] .timer-val { color: #374151; }
+[data-theme="light"] .timer-label { color: #9ca3af; }
+[data-theme="light"] .rate-real-time { color: #9ca3af; }
+[data-theme="light"] .btn--small { background: rgba(0,0,0,0.07); color: #374151; }
+[data-theme="light"] .btn--small:hover { background: rgba(0,0,0,0.12); }
+[data-theme="light"] .inv-cat-btn { background: #f3f4f6; border-color: #e5e7eb; color: #6b7280; }
+[data-theme="light"] .inv-cat-btn:hover { border-color: #9ca3af; color: #374151; }
+[data-theme="light"] .history-session-date { color: #374151; }
+[data-theme="light"] .history-session-stats { color: #9ca3af; }
+[data-theme="light"] .history-session-row:hover { background: rgba(0,0,0,0.04); }
+[data-theme="light"] .market-name { color: #374151; }
+[data-theme="light"] .update-dialog { background: #ffffff; border-color: #e5e7eb; }
+[data-theme="light"] .update-title { color: #111827; }
+[data-theme="light"] .update-body { color: #6b7280; }
+[data-theme="light"] .update-body strong { color: #111827; }
+[data-theme="light"] .center-panel h2 { color: #111827; }
+[data-theme="light"] .sidebar { background: rgba(0,0,0,0.1); border-right-color: rgba(0,0,0,0.1); }
+[data-theme="light"] .tab-btn { color: #374151; }
+[data-theme="light"] .tab-btn:hover { color: #111827; }
+[data-theme="light"] .titlebar-title { color: #1f2937; }
+[data-theme="light"] .hint { color: #6b7280; }
+[data-theme="light"] .hint strong { color: #374151; }
+[data-theme="light"] .small-path { color: #9ca3af; }
+[data-theme="light"] .settings-divider { background: rgba(0,0,0,0.08); }
+[data-theme="light"] .custom-bg-input { background: rgba(0,0,0,0.05); border-color: rgba(0,0,0,0.12); color: #374151; }
+[data-theme="light"] .custom-bg-input::placeholder { color: #9ca3af; }
+
+/* ── Miku theme overrides ── */
+[data-theme="miku"] .titlebar { background: #0f172a; }
+[data-theme="miku"] .sidebar { background: #111827; }
+[data-theme="miku"] .stat-card { background: #1f2937; border-color: rgba(255,255,255,0.06); }
+[data-theme="miku"] .loot-panel { background: #1f2937; border-color: rgba(255,255,255,0.06); }
+[data-theme="miku"] .map-row { background: rgba(255,255,255,0.03); }
+[data-theme="miku"] .map-row:hover { background: rgba(255,255,255,0.06); }
+[data-theme="miku"] .price-row { background: #1f2937; }
+[data-theme="miku"] .loot-row { background: rgba(255,255,255,0.03); }
+[data-theme="miku"] .update-dialog { background: #1f2937; }
+[data-theme="miku"] .pricing-card {
+  background: #1f2937;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  padding: 12px 14px;
+  gap: 10px;
+}
+[data-theme="miku"] .map-list-header { background: #1f2937; border-color: rgba(255,255,255,0.06); }
+[data-theme="miku"] .timers-row { background: #1f2937; border-color: rgba(255,255,255,0.06); }
+
+/* ── Custom (image) theme overrides ── */
+[data-theme="custom"] .stat-card { background: rgba(17,24,39,0.75); border-color: rgba(255,255,255,0.08); }
+[data-theme="custom"] .loot-panel { background: rgba(17,24,39,0.8); border-color: rgba(255,255,255,0.08); }
+[data-theme="custom"] .map-row { background: rgba(0,0,0,0.35); }
+[data-theme="custom"] .map-row:hover { background: rgba(0,0,0,0.5); }
+[data-theme="custom"] .price-row { background: rgba(0,0,0,0.35); }
+[data-theme="custom"] .loot-row { background: rgba(0,0,0,0.3); }
+[data-theme="custom"] .update-dialog { background: rgba(17,24,39,0.95); }
+[data-theme="custom"] .titlebar { background: rgba(0,0,0,0.6); }
+[data-theme="custom"] .sidebar { background: rgba(0,0,0,0.5); }
 </style>

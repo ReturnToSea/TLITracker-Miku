@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx asar:*)"
+      "Bash(npx asar:*)",
+      "Bash(curl:*)",
+      "WebFetch(domain:titrack.ninja)"
     ]
   }
 }

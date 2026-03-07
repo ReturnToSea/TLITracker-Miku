@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electronAPI', {
   getOSInfo: () => ipcRenderer.invoke('get-os-info'),
   openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
+  openImageDialog: () => ipcRenderer.invoke('open-image-dialog'),
   openDirectoryDialog: () => ipcRenderer.invoke('open-directory-dialog'),
   findLogInDir: (dirPath) => ipcRenderer.invoke('find-log-in-dir', dirPath),
   runShellCommand: (cmd) => ipcRenderer.invoke('run-shell-command', cmd),
@@ -81,6 +82,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Pricing
   fetchPrices: () => ipcRenderer.invoke('fetch-prices'),
   loadPrices: () => ipcRenderer.invoke('load-prices'),
+
+  // Session history
+  saveSessions: (sessions) => ipcRenderer.invoke('save-sessions', sessions),
+  loadSessions: () => ipcRenderer.invoke('load-sessions'),
 
   // Auto updater
   checkForUpdates: () => ipcRenderer.send('check-for-updates'),

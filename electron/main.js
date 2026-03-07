@@ -13,6 +13,10 @@ const PRICES_FILE = process.env.NODE_ENV === 'development'
   ? path.join(__dirname, '..', 'prices.json')
   : path.join(path.dirname(app.getPath('exe')), 'prices.json');
 
+const SESSIONS_FILE = process.env.NODE_ENV === 'development'
+  ? path.join(__dirname, '..', 'sessions.json')
+  : path.join(path.dirname(app.getPath('exe')), 'sessions.json');
+
 // Bracket-match to extract a JSON array after "key": in raw HTML.
 // Handles both plain JSON and Next.js RSC escaped format (\"key\":[...]).
 function extractJsonArray(html, key) {
@@ -253,6 +257,15 @@ async function createWindow() {
     const result = await dialog.showOpenDialog(mainWindow, {
       title: 'Select UE_game.log',
       filters: [{ name: 'Log Files', extensions: ['log'] }],
+      properties: ['openFile'],
+    });
+    return result.canceled ? null : result.filePaths[0];
+  });
+
+  ipcMain.handle('open-image-dialog', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Select Background Image',
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif'] }],
       properties: ['openFile'],
     });
     return result.canceled ? null : result.filePaths[0];
@@ -587,6 +600,19 @@ app.whenReady().then(() => {
       return JSON.parse(raw);
     } catch (_) {
       return null;
+    }
+  });
+
+  ipcMain.handle('save-sessions', async (_event, sessions) => {
+    await fs.writeFile(SESSIONS_FILE, JSON.stringify(sessions), 'utf-8');
+  });
+
+  ipcMain.handle('load-sessions', async () => {
+    try {
+      const raw = await fs.readFile(SESSIONS_FILE, 'utf-8');
+      return JSON.parse(raw);
+    } catch (_) {
+      return [];
     }
   });
 });
