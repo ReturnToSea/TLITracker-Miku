@@ -734,10 +734,11 @@ async function stopTracking() {
 }
 
 function resetSession() {
-  finalizeSession()
+  try { finalizeSession() } catch (e) { console.error('finalizeSession error:', e) }
   state.currentMap = null
   state.mapHistory = []
   state.sessionStart = null
+  selectedMapTime.value = null
   // Keep inventory — snapshot is still valid, no need to re-sort
 }
 
@@ -859,7 +860,7 @@ onUnmounted(() => {
             <div class="update-progress-bar"><div class="update-progress-fill" :style="{ width: updateProgress + '%' }"></div></div>
           </template>
           <template v-else-if="updateState === 'ready'">
-            Update downloaded. Restart now to apply version <strong>{{ updateVersion }}</strong>?
+            Version <strong>{{ updateVersion }}</strong> has been downloaded. Close and reopen the app to apply the update.
           </template>
         </div>
         <div class="update-actions">
@@ -871,8 +872,7 @@ onUnmounted(() => {
             <button class="btn btn--small" disabled>Downloading…</button>
           </template>
           <template v-else-if="updateState === 'ready'">
-            <button class="btn btn--primary" @click="installUpdate">Restart & Install</button>
-            <button class="btn btn--small" @click="updateState = null">Later</button>
+            <button class="btn btn--primary" @click="updateState = null">Got it</button>
           </template>
         </div>
       </div>
