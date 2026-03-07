@@ -1,6 +1,6 @@
 {
   "name": "tli-tracker",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Torchlight Infinite farming tracker",
   "main": "electron/main.js",
   "scripts": {
@@ -26,6 +26,7 @@
   "build": {
     "appId": "com.tlitracker.app",
     "productName": "TLI Tracker",
+    "icon": "build/icon.png",
     "directories": {
       "output": "dist-electron"
     },
@@ -33,6 +34,7 @@
       "electron/**/*",
       "src/**/*",
       "frontend/dist/**/*",
+      "build/icon.png",
       "package.json"
     ],
     "publish": {
