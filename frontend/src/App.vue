@@ -59,6 +59,7 @@ function handleItemChange(content) {
         state.inventory[idx].count -= removed
         if (state.inventory[idx].count <= 0) state.inventory.splice(idx, 1)
       }
+      state.marketLog.unshift({ type: 'listed', baseId, count: removed, time: Date.now() })
     }
     return
   }
@@ -105,6 +106,11 @@ function handleItemChange(content) {
       } else if (idx >= 0) {
         state.inventory[idx].count += delta
         if (state.inventory[idx].count <= 0) state.inventory.splice(idx, 1)
+      }
+      if (inXchgReceive) {
+        state.marketLog.unshift({ type: 'claimed', baseId, count: Math.abs(delta), time: Date.now() })
+      } else {
+        state.marketLog.unshift({ type: 'bought', baseId, count: Math.abs(delta), time: Date.now() })
       }
     }
   }
@@ -279,6 +285,7 @@ const state = reactive({
   currentMap: null,      // { areaId, mapId, checkType, startTime, pickups: [] }
   mapHistory: [],
   sessionStart: null,
+  marketLog: [],         // [{ type: 'listed'|'claimed'|'bought', baseId, count, time }]
 })
 
 // ── Computed stats ─────────────────────────────────────────────────────────
@@ -544,6 +551,10 @@ function checkForUpdates() {
   window.electronAPI?.checkForUpdates()
 }
 
+function installUpdate() {
+  window.electronAPI?.installUpdate()
+}
+
 // ── Settings ───────────────────────────────────────────────────────────────
 const STORAGE_KEY = 'tli-log-path'
 const activeTab = ref('overview')
@@ -664,6 +675,15 @@ function formatDate(ts) {
   return new Date(ts).toLocaleString()
 }
 
+function formatTime(ts) {
+  const d = new Date(ts)
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+function marketItemName(baseId) {
+  return state.priceNames[baseId] ?? (baseId === FE_BASE_ID ? 'Flame Elementium' : `#${baseId}`)
+}
+
 onMounted(async () => {
   setupUpdaterListeners()
 
@@ -739,7 +759,7 @@ onUnmounted(() => {
             <button class="btn btn--small" disabled>Downloading…</button>
           </template>
           <template v-else-if="updateState === 'ready'">
-            <button class="btn btn--primary" @click="window.electronAPI.installUpdate()">Restart & Install</button>
+            <button class="btn btn--primary" @click="installUpdate">Restart & Install</button>
             <button class="btn btn--small" @click="updateState = null">Later</button>
           </template>
         </div>
@@ -761,6 +781,11 @@ onUnmounted(() => {
           :class="{ active: activeTab === 'loot' }"
           @click="activeTab = 'loot'"
         >Loot</button>
+        <button
+          class="tab-btn"
+          :class="{ active: activeTab === 'market' }"
+          @click="activeTab = 'market'"
+        >Market</button>
         <button
           class="tab-btn"
           :class="{ active: activeTab === 'pricing' }"
@@ -940,6 +965,33 @@ onUnmounted(() => {
               <span style="text-align:right;color:#6b7280">×{{ item.count }}</span>
               <span style="text-align:right;color:#9ca3af">{{ state.prices[item.baseId] != null ? state.prices[item.baseId] : '—' }}</span>
               <span class="col-price price-val">{{ formatVal(item.value) }} 🔥</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Market tab -->
+        <div v-else-if="activeTab === 'market'" class="panel">
+          <div class="pricing-header">
+            <div>
+              <div class="pricing-title">Market Activity</div>
+              <div class="pricing-meta">{{ state.marketLog.length }} events</div>
+            </div>
+            <button class="btn btn--small" :disabled="!state.marketLog.length" @click="state.marketLog = []">Clear</button>
+          </div>
+          <div class="price-list">
+            <div v-if="!state.marketLog.length" class="empty">
+              No market activity yet — list, buy, or claim items to see them here.
+            </div>
+            <div v-for="(entry, i) in state.marketLog" :key="i" class="market-row">
+              <span class="market-badge" :class="'market-badge--' + entry.type">
+                {{ entry.type === 'listed' ? 'Listed' : entry.type === 'claimed' ? 'Claimed' : 'Bought' }}
+              </span>
+              <span class="market-name">{{ marketItemName(entry.baseId) }}</span>
+              <span class="market-qty muted">×{{ entry.count }}</span>
+              <span class="market-val" :class="entry.type === 'bought' ? 'cost-val' : entry.type === 'claimed' ? 'positive' : 'muted'">
+                {{ entry.type === 'bought' ? '-' : entry.type === 'claimed' ? '+' : '' }}{{ formatVal(itemValue(entry.baseId, entry.count)) }} 🔥
+              </span>
+              <span class="market-time muted">{{ formatTime(entry.time) }}</span>
             </div>
           </div>
         </div>
@@ -1269,6 +1321,29 @@ onUnmounted(() => {
 .col-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .col-price { text-align: right; }
 .price-val { color: #fbbf24; font-weight: 500; }
+
+/* ── Market tab ── */
+.market-row {
+  display: grid;
+  grid-template-columns: 70px 1fr 50px 90px 70px;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  gap: 6px;
+}
+.market-row:hover { background: rgba(255,255,255,0.03); }
+.market-badge {
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 4px; text-align: center;
+}
+.market-badge--listed  { background: rgba(99,102,241,0.15); color: #818cf8; }
+.market-badge--claimed { background: rgba(34,197,94,0.12);  color: #4ade80; }
+.market-badge--bought  { background: rgba(239,68,68,0.12);  color: #f87171; }
+.market-name { color: #d1d5db; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.market-qty  { text-align: right; }
+.market-val  { text-align: right; font-weight: 500; }
+.market-time { text-align: right; font-size: 11px; }
 
 /* ── Update dialog ── */
 .update-overlay {
