@@ -38,7 +38,8 @@
     "publish": {
       "provider": "github",
       "owner": "ReturnToSea",
-      "repo": "TLITracker-Miku"
+      "repo": "TLITracker-Miku",
+      "releaseType": "release"
     },
     "win": {
       "target": [
@@ -52,7 +53,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "perMachine": false
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
     },
     "mac": {
       "target": [
