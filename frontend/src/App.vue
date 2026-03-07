@@ -26,6 +26,7 @@ let inPickItems = false
 let inSpv3Open = false
 let inXchgForSale = false
 let inXchgReceive = false
+let inXchgBuy = false
 
 // Items consumed before entering a map (beacons, compasses, etc.)
 // Gets attached to the next dungeon map that starts, then cleared.
@@ -43,6 +44,8 @@ function handleItemChange(content) {
   if (content.match(/^ProtoName=XchgForSale\s+end/))        { inXchgForSale = false; return }
   if (content.match(/^ProtoName=XchgReceive\s+start/))      { inXchgReceive = true; return }
   if (content.match(/^ProtoName=XchgReceive\s+end/))        { inXchgReceive = false; return }
+  if (content.match(/^ProtoName=XchgBuy\s+start/))          { inXchgBuy = true; return }
+  if (content.match(/^ProtoName=XchgBuy\s+end/))            { inXchgBuy = false; return }
 
   // Listing an item on market: Delete Id=<baseId>_<uuid> in PageId=X SlotId=Y
   if (inXchgForSale) {
@@ -88,8 +91,9 @@ function handleItemChange(content) {
     return
   }
 
-  if (inXchgReceive) {
-    // Claiming proceeds from a sale — update inventory with the delta (e.g. FE received)
+  if (inXchgReceive || inXchgBuy) {
+    // XchgReceive: FE/items received from claiming a sale
+    // XchgBuy: FE decreases when buying from market
     const prev = slotCounts[uuid]?.count ?? 0
     const delta = newCount - prev
     slotCounts[uuid] = { baseId, count: newCount }
@@ -332,6 +336,21 @@ const profitRateRealTime = computed(() => {
   return rateMode.value === 'hr' ? sessionProfit.value / (ms / 3600000) : sessionProfit.value / (ms / 60000)
 })
 
+const mapCount = computed(() =>
+  state.mapHistory.length + (state.currentMap ? 1 : 0)
+)
+
+const avgProfitPerMap = computed(() => {
+  if (mapCount.value === 0) return 0
+  return sessionProfit.value / mapCount.value
+})
+
+const bestMap = computed(() => {
+  const maps = [...state.mapHistory, ...(state.currentMap ? [state.currentMap] : [])]
+  if (!maps.length) return null
+  return maps.reduce((best, m) => mapProfit(m) > mapProfit(best) ? m : best, maps[0])
+})
+
 const logStatus = computed(() => {
   if (state.status !== 'watching') return 'disconnected'
   if (!state.isLogging) return 'waiting'
@@ -445,13 +464,13 @@ const lootPanelItems = computed(() => {
     grouped[p.baseId].count += p.count
   })
   return Object.values(grouped)
-    .map(p => ({ ...p, value: itemValue(p.baseId, p.count), name: state.priceNames[p.baseId] ?? `#${p.baseId}` }))
+    .map(p => ({ ...p, value: itemValue(p.baseId, p.count), name: state.priceNames[p.baseId] ?? (p.baseId === FE_BASE_ID ? 'Flame Elementium' : `#${p.baseId}`) }))
     .sort((a, b) => b.value - a.value)
 })
 
 const inventorySorted = computed(() => {
   return [...state.inventory]
-    .map(i => ({ ...i, value: itemValue(i.baseId, i.count), name: state.priceNames[i.baseId] ?? `#${i.baseId}` }))
+    .map(i => ({ ...i, value: itemValue(i.baseId, i.count), name: state.priceNames[i.baseId] ?? (i.baseId === FE_BASE_ID ? 'Flame Elementium' : `#${i.baseId}`) }))
     .sort((a, b) => b.value - a.value)
 })
 
@@ -463,6 +482,46 @@ function mapLabel(map) {
   if (map.mapId) return `Map ${map.mapId}`
   const prefix = map.areaId?.split('_')[0]
   return prefix ? `Area ${prefix}` : 'Unknown'
+}
+
+// ── Auto updater ───────────────────────────────────────────────────────────
+// update state: null | 'available' | 'downloading' | 'ready' | 'error' | 'checking' | 'up-to-date'
+const updateState = ref(null)
+const updateVersion = ref('')
+const updateProgress = ref(0)
+const updateError = ref('')
+
+function setupUpdaterListeners() {
+  window.electronAPI?.onUpdateAvailable((info) => {
+    updateVersion.value = info.version
+    updateState.value = 'available'
+  })
+  window.electronAPI?.onUpdateNotAvailable(() => {
+    if (updateState.value === 'checking') updateState.value = 'up-to-date'
+  })
+  window.electronAPI?.onUpdateDownloadProgress((pct) => {
+    updateProgress.value = pct
+    updateState.value = 'downloading'
+  })
+  window.electronAPI?.onUpdateDownloaded(() => {
+    updateState.value = 'ready'
+  })
+  window.electronAPI?.onUpdateError((msg) => {
+    updateError.value = msg
+    updateState.value = 'error'
+  })
+}
+
+function startDownload() {
+  updateState.value = 'downloading'
+  updateProgress.value = 0
+  window.electronAPI?.downloadUpdate()
+}
+
+function checkForUpdates() {
+  updateState.value = 'checking'
+  updateError.value = ''
+  window.electronAPI?.checkForUpdates()
 }
 
 // ── Settings ───────────────────────────────────────────────────────────────
@@ -585,6 +644,8 @@ function formatDate(ts) {
 }
 
 onMounted(async () => {
+  setupUpdaterListeners()
+
   // Load saved prices from file (gives baseline without hitting the site)
   const saved = await window.electronAPI?.loadPrices()
   if (saved?.prices) {
@@ -594,6 +655,9 @@ onMounted(async () => {
     state.priceCategories = saved.categories ?? {}
     state.priceLastUpdated = saved.lastUpdated
   }
+
+  // Background price refresh on startup — don't await, runs silently
+  refreshPrices()
 
   const s = await window.electronAPI?.getTorStatus()
   if (s?.isLoggingActive) {
@@ -627,6 +691,40 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <!-- Update dialog -->
+    <div v-if="updateState === 'available' || updateState === 'downloading' || updateState === 'ready'" class="update-overlay">
+      <div class="update-dialog">
+        <div class="update-title">
+          {{ updateState === 'ready' ? 'Update Ready' : 'Update Available' }}
+        </div>
+        <div class="update-body">
+          <template v-if="updateState === 'available'">
+            Version <strong>{{ updateVersion }}</strong> is available. Download and install now?
+          </template>
+          <template v-else-if="updateState === 'downloading'">
+            Downloading update… {{ updateProgress }}%
+            <div class="update-progress-bar"><div class="update-progress-fill" :style="{ width: updateProgress + '%' }"></div></div>
+          </template>
+          <template v-else-if="updateState === 'ready'">
+            Update downloaded. Restart now to apply version <strong>{{ updateVersion }}</strong>?
+          </template>
+        </div>
+        <div class="update-actions">
+          <template v-if="updateState === 'available'">
+            <button class="btn btn--primary" @click="startDownload">Download</button>
+            <button class="btn btn--small" @click="updateState = null">Later</button>
+          </template>
+          <template v-else-if="updateState === 'downloading'">
+            <button class="btn btn--small" disabled>Downloading…</button>
+          </template>
+          <template v-else-if="updateState === 'ready'">
+            <button class="btn btn--primary" @click="window.electronAPI.installUpdate()">Restart & Install</button>
+            <button class="btn btn--small" @click="updateState = null">Later</button>
+          </template>
+        </div>
+      </div>
+    </div>
+
     <!-- Body -->
     <div class="body">
 
@@ -639,14 +737,14 @@ onUnmounted(() => {
         >Overview</button>
         <button
           class="tab-btn"
-          :class="{ active: activeTab === 'pricing' }"
-          @click="activeTab = 'pricing'"
-        >Pricing</button>
-        <button
-          class="tab-btn"
           :class="{ active: activeTab === 'loot' }"
           @click="activeTab = 'loot'"
         >Loot</button>
+        <button
+          class="tab-btn"
+          :class="{ active: activeTab === 'pricing' }"
+          @click="activeTab = 'pricing'"
+        >Pricing</button>
         <button
           class="tab-btn"
           :class="{ active: activeTab === 'settings' }"
@@ -678,6 +776,20 @@ onUnmounted(() => {
                 </div>
                 <div class="stat-value">{{ formatVal(profitRateMapTime) }} 🔥</div>
                 <div class="rate-real-time">{{ formatVal(profitRateRealTime) }} 🔥 real time</div>
+              </div>
+            </div>
+            <div class="stats-row">
+              <div class="stat-card">
+                <div class="stat-label">Maps Run</div>
+                <div class="stat-value stat-value--sm">{{ mapCount }}</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Avg / Map</div>
+                <div class="stat-value stat-value--sm">{{ mapCount ? formatVal(avgProfitPerMap) + ' 🔥' : '—' }}</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Best Map</div>
+                <div class="stat-value stat-value--sm">{{ bestMap ? formatVal(mapProfit(bestMap)) + ' 🔥' : '—' }}</div>
               </div>
             </div>
             <button class="btn btn--small reset-btn" @click="resetSession">Reset Session</button>
@@ -726,7 +838,7 @@ onUnmounted(() => {
                   v-for="(map, i) in allMaps"
                   :key="i"
                   class="map-row"
-                  :class="{ 'map-row--live': map.live, 'map-row--selected': selectedMapTime === map.startTime || (selectedMapTime === null && map.live) }"
+                  :class="{ 'map-row--live': map.live, 'map-row--selected': selectedMapTime === map.startTime || (selectedMapTime === null && map.live), 'map-row--best': bestMap && map.startTime === bestMap.startTime && mapCount > 1 }"
                   @click="selectedMapTime = map.startTime; lootPanelMode = 'map'"
                 >
                   <span class="col-area">
@@ -816,6 +928,16 @@ onUnmounted(() => {
             style="margin-top: 8px"
             @click="activeTab = 'overview'"
           >Back</button>
+
+          <div class="settings-divider"></div>
+
+          <button
+            class="btn btn--small"
+            :disabled="updateState === 'checking' || updateState === 'downloading'"
+            @click="checkForUpdates"
+          >{{ updateState === 'checking' ? 'Checking…' : 'Check for Updates' }}</button>
+          <p v-if="updateState === 'up-to-date'" class="hint" style="margin-top:6px">You're up to date.</p>
+          <p v-if="updateState === 'error'" class="hint" style="margin-top:6px;color:#f87171">{{ updateError }}</p>
         </div>
 
         <!-- Pricing tab -->
@@ -962,6 +1084,8 @@ onUnmounted(() => {
 }
 .stat-label { font-size: 11px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
 .stat-value { font-size: 18px; font-weight: 600; color: #f9fafb; }
+.stat-value--sm { font-size: 14px; }
+.map-row--best { border-color: rgba(234,179,8,0.4) !important; background: rgba(234,179,8,0.06) !important; }
 
 /* Rate card */
 .rate-card { position: relative; }
@@ -1099,4 +1223,24 @@ onUnmounted(() => {
 .col-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .col-price { text-align: right; }
 .price-val { color: #fbbf24; font-weight: 500; }
+
+/* ── Update dialog ── */
+.update-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.update-dialog {
+  background: #1f2937; border: 1px solid #374151; border-radius: 10px;
+  padding: 24px; width: 320px; display: flex; flex-direction: column; gap: 14px;
+}
+.update-title { font-size: 15px; font-weight: 600; color: #f9fafb; }
+.update-body { font-size: 13px; color: #9ca3af; line-height: 1.5; }
+.update-body strong { color: #f9fafb; }
+.update-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.update-progress-bar {
+  margin-top: 8px; height: 4px; background: #374151; border-radius: 2px; overflow: hidden;
+}
+.update-progress-fill { height: 100%; background: #3b82f6; transition: width 0.3s ease; }
+.settings-divider { height: 1px; background: #1f2937; margin: 8px 0; }
 </style>

@@ -81,4 +81,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Pricing
   fetchPrices: () => ipcRenderer.invoke('fetch-prices'),
   loadPrices: () => ipcRenderer.invoke('load-prices'),
+
+  // Auto updater
+  checkForUpdates: () => ipcRenderer.send('check-for-updates'),
+  downloadUpdate: () => ipcRenderer.send('download-update'),
+  installUpdate: () => ipcRenderer.send('install-update'),
+  onUpdateAvailable: (cb) => ipcRenderer.on('update-available', (_, info) => cb(info)),
+  onUpdateNotAvailable: (cb) => ipcRenderer.on('update-not-available', () => cb()),
+  onUpdateDownloadProgress: (cb) => ipcRenderer.on('update-download-progress', (_, pct) => cb(pct)),
+  onUpdateDownloaded: (cb) => ipcRenderer.on('update-downloaded', () => cb()),
+  onUpdateError: (cb) => ipcRenderer.on('update-error', (_, msg) => cb(msg)),
 });

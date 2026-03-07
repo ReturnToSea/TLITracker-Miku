@@ -24,11 +24,7 @@ jobs:
       - name: Install frontend dependencies
         run: npm install --prefix frontend
 
-      - name: Build Windows zip
-        run: npm run build:win
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist-electron/*.zip
-          generate_release_notes: true
+      - name: Build and publish Windows installer
+        run: npm run build:win -- --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

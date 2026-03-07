@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const os = require('os');
 const { exec } = require('child_process');
 const fs = require('fs').promises;
@@ -141,6 +142,8 @@ async function createWindow() {
     mainWindow.webContents.openDevTools();
   } else {
     await mainWindow.loadFile(path.join(__dirname, '../frontend/dist/index.html'));
+    // Check for updates after UI is loaded so the renderer can show the dialog
+    autoUpdater.checkForUpdates();
   }
 
   mainWindowRestoreBounds = mainWindow.getBounds();
@@ -438,6 +441,39 @@ function routeLogMessage(msg) {
   }
 }
 
+// ── Auto updater ─────────────────────────────────────────────────────────────
+
+autoUpdater.autoDownload = false;
+
+autoUpdater.on('update-available', (info) => {
+  if (mainWindow && !mainWindow.isDestroyed())
+    mainWindow.webContents.send('update-available', { version: info.version });
+});
+
+autoUpdater.on('update-not-available', () => {
+  if (mainWindow && !mainWindow.isDestroyed())
+    mainWindow.webContents.send('update-not-available');
+});
+
+autoUpdater.on('download-progress', (progress) => {
+  if (mainWindow && !mainWindow.isDestroyed())
+    mainWindow.webContents.send('update-download-progress', Math.floor(progress.percent));
+});
+
+autoUpdater.on('update-downloaded', () => {
+  if (mainWindow && !mainWindow.isDestroyed())
+    mainWindow.webContents.send('update-downloaded');
+});
+
+autoUpdater.on('error', (err) => {
+  if (mainWindow && !mainWindow.isDestroyed())
+    mainWindow.webContents.send('update-error', err.message);
+});
+
+ipcMain.on('check-for-updates', () => { autoUpdater.checkForUpdates(); });
+ipcMain.on('download-update', () => { autoUpdater.downloadUpdate(); });
+ipcMain.on('install-update', () => { autoUpdater.quitAndInstall(); });
+
 // ── App startup ─────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
@@ -485,18 +521,27 @@ app.whenReady().then(() => {
     return win.id;
   });
 
-  ipcMain.handle('fetch-prices', async () => {
-    const html = await new Promise((resolve, reject) => {
-      const req = https.get('https://titrack.ninja', {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-      }, (res) => {
-        let data = '';
-        res.on('data', (chunk) => { data += chunk; });
-        res.on('end', () => resolve(data));
-      });
-      req.on('error', reject);
-      req.setTimeout(20000, () => { req.destroy(); reject(new Error('Request timed out')); });
+  const fetchTitrackHtml = () => new Promise((resolve, reject) => {
+    const req = https.get('https://titrack.ninja', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+    }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => resolve(data));
     });
+    req.on('error', reject);
+    req.setTimeout(20000, () => { req.destroy(); reject(new Error('Request timed out')); });
+  });
+
+  ipcMain.handle('fetch-prices', async () => {
+    let html = await fetchTitrackHtml();
+
+    // Site sometimes returns a response without allItems on the first hit (CDN/cache issue).
+    // Retry once after a short delay before giving up.
+    if (html.indexOf('"allItems"') === -1) {
+      await new Promise(r => setTimeout(r, 1500));
+      html = await fetchTitrackHtml();
+    }
 
     // Debug: check if allItems appears in raw HTML at all
     const rawIdx = html.indexOf('"allItems"');

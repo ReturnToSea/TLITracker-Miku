@@ -1,6 +1,6 @@
 {
   "name": "tli-tracker",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "description": "Torchlight Infinite farming tracker",
   "main": "electron/main.js",
   "scripts": {
@@ -13,6 +13,7 @@
     "test": "node test/log-parser-test.js"
   },
   "dependencies": {
+    "electron-updater": "^6.3.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
@@ -34,15 +35,24 @@
       "frontend/dist/**/*",
       "package.json"
     ],
+    "publish": {
+      "provider": "github",
+      "owner": "ReturnToSea",
+      "repo": "TLITracker-Miku"
+    },
     "win": {
       "target": [
         {
-          "target": "zip",
+          "target": "nsis",
           "arch": [
             "x64"
           ]
         }
       ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false
     },
     "mac": {
       "target": [
