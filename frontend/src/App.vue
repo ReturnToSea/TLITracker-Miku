@@ -468,11 +468,31 @@ const lootPanelItems = computed(() => {
     .sort((a, b) => b.value - a.value)
 })
 
-const inventorySorted = computed(() => {
-  return [...state.inventory]
-    .map(i => ({ ...i, value: itemValue(i.baseId, i.count), name: state.priceNames[i.baseId] ?? (i.baseId === FE_BASE_ID ? 'Flame Elementium' : `#${i.baseId}`) }))
+const inventoryWithMeta = computed(() =>
+  [...state.inventory]
+    .map(i => ({
+      ...i,
+      value: itemValue(i.baseId, i.count),
+      name: state.priceNames[i.baseId] ?? (i.baseId === FE_BASE_ID ? 'Flame Elementium' : `#${i.baseId}`),
+      category: state.priceCategories[i.baseId] ?? 'Other',
+    }))
     .sort((a, b) => b.value - a.value)
+)
+
+const inventoryCategories = computed(() => {
+  const cats = new Set(inventoryWithMeta.value.map(i => i.category))
+  return ['All', ...Array.from(cats).sort()]
 })
+
+const inventorySorted = computed(() => {
+  if (!selectedInventoryCategory.value || selectedInventoryCategory.value === 'All')
+    return inventoryWithMeta.value
+  return inventoryWithMeta.value.filter(i => i.category === selectedInventoryCategory.value)
+})
+
+const inventoryFilteredValue = computed(() =>
+  inventorySorted.value.reduce((s, i) => s + i.value, 0)
+)
 
 function mapLabel(map) {
   if (map.spAreaId) {
@@ -533,6 +553,7 @@ const lootPanelMode = ref('map')       // 'map' | 'session' — scope of loot/co
 const lootContentMode = ref('loot')    // 'loot' | 'cost' — what the panel shows
 const rateMode = ref('hr')             // 'hr' | 'min' — FE rate card toggle
 const selectedMapTime = ref(null)      // startTime of map clicked in list; null = auto (current/last)
+const selectedInventoryCategory = ref('All')
 
 async function pickLogFile() {
   if (!window.electronAPI) return
@@ -886,7 +907,19 @@ onUnmounted(() => {
         <div v-else-if="activeTab === 'loot'" class="panel">
           <div class="pricing-header">
             <div class="pricing-title">Inventory by Value</div>
-            <div class="pricing-meta">{{ inventorySorted.length }} items · {{ formatVal(networth) }} 🔥 total</div>
+            <div class="pricing-meta">
+              {{ inventorySorted.length }} items · {{ formatVal(inventoryFilteredValue) }} 🔥
+              <span v-if="selectedInventoryCategory !== 'All'"> in {{ selectedInventoryCategory }}</span>
+            </div>
+          </div>
+          <div class="inv-category-bar">
+            <button
+              v-for="cat in inventoryCategories"
+              :key="cat"
+              class="inv-cat-btn"
+              :class="{ active: selectedInventoryCategory === cat }"
+              @click="selectedInventoryCategory = cat"
+            >{{ cat }}</button>
           </div>
           <div class="price-list-header inv-grid">
             <span class="col-name">Item</span>
@@ -1190,6 +1223,19 @@ onUnmounted(() => {
 .loot-count { text-align: right; }
 .loot-val { text-align: right; color: #fbbf24; font-weight: 500; }
 .loot-empty { padding: 12px 0; font-size: 12px; }
+
+/* Inventory category filter */
+.inv-category-bar {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 6px 0 8px; flex-shrink: 0;
+}
+.inv-cat-btn {
+  padding: 3px 10px; border-radius: 999px; font-size: 11px;
+  background: #1f2937; border: 1px solid #374151; color: #6b7280;
+  cursor: pointer; transition: all 0.15s;
+}
+.inv-cat-btn:hover { border-color: #4b5563; color: #d1d5db; }
+.inv-cat-btn.active { background: #3b82f6; border-color: #3b82f6; color: #fff; }
 
 /* Inventory grid (loot tab) */
 .inv-grid { grid-template-columns: 1fr 50px 70px 80px !important; }
