@@ -1,6 +1,6 @@
 {
   "name": "tli-tracker",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Torchlight Infinite farming tracker",
   "main": "electron/main.js",
   "scripts": {

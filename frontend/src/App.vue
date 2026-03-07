@@ -441,6 +441,7 @@ function mapTime(map) {
 
 const totalMapsTime = computed(() => fmtDuration(totalMapsMs.value))
 
+
 const realTime = computed(() => {
   if (!state.sessionStart) return '0:00'
   return fmtDuration(now.value - state.sessionStart)
@@ -557,6 +558,62 @@ function finalizeSession() {
   window.electronAPI?.saveSessions(state.sessionHistory)
 }
 
+const exportCopied = ref(null) // null | 'current' | session.id
+
+function buildDiscordExport(maps, startTime, endTime) {
+  const profit = maps.reduce((s, m) => s + mapProfit(m), 0)
+  const mapMs = maps.reduce((s, m) => s + ((m.endTime ?? Date.now()) - m.startTime), 0)
+  const sessionMs = (endTime && startTime) ? endTime - startTime : mapMs
+  const feHr = mapMs > 6000 ? profit / (mapMs / 3600000) : 0
+  const count = maps.length
+  const avgProfit = count ? Math.round(profit / count) : 0
+  const best = count ? maps.reduce((b, m) => mapProfit(m) > mapProfit(b) ? m : b, maps[0]) : null
+
+  const allPickups = {}
+  maps.forEach(m => {
+    m.pickups.forEach(p => {
+      if (!allPickups[p.baseId]) allPickups[p.baseId] = { baseId: p.baseId, count: 0 }
+      allPickups[p.baseId].count += p.count
+    })
+  })
+  const topDrops = Object.values(allPickups)
+    .map(p => ({ ...p, value: itemValue(p.baseId, p.count), name: state.priceNames[p.baseId] ?? (p.baseId === FE_BASE_ID ? 'Flame Elementium' : null) }))
+    .filter(p => p.value > 0 && p.name)
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 8)
+
+  const f = n => formatVal(n).replace(/\.0([KM]?)$/, '$1')
+  const fmtDur = ms => { const tot = Math.floor(ms / 60000); const h = Math.floor(tot / 60); const m = tot % 60; return h > 0 ? `${h}h ${m}m` : `${m}m` }
+  const dateStr = startTime ? new Date(startTime).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''
+
+  let text = `**TLI Tracker — Session Summary**\n`
+  text += dateStr ? `🗓 ${dateStr} · ⏱ ${fmtDur(sessionMs)}\n` : `⏱ ${fmtDur(sessionMs)}\n`
+  text += `\n📊 **Stats**\n`
+  text += `Maps: ${count} · Profit: ${f(profit)} FE · Avg: ${f(avgProfit)}/map · FE/hr: ${f(feHr)}\n`
+  if (best && count > 1) {
+    text += `\n🏆 **Best Map**\n${mapLabel(best)} — ${f(mapProfit(best))} FE\n`
+  }
+  if (topDrops.length) {
+    text += `\n💰 **Top Drops**\n`
+    topDrops.forEach(d => { text += `${d.name} ×${d.count} — ${f(d.value)} FE\n` })
+  }
+  return text.trim()
+}
+
+async function exportCurrentSession() {
+  const maps = [...state.mapHistory, ...(state.currentMap ? [state.currentMap] : [])]
+  if (!maps.length) return
+  await navigator.clipboard.writeText(buildDiscordExport(maps, state.sessionStart, Date.now()))
+  exportCopied.value = 'current'
+  setTimeout(() => { exportCopied.value = null }, 2000)
+}
+
+async function exportHistorySession(session) {
+  await navigator.clipboard.writeText(buildDiscordExport(session.maps, session.startTime, session.endTime))
+  exportCopied.value = session.id
+  setTimeout(() => { exportCopied.value = null }, 2000)
+}
+
 function deleteHistorySession(id) {
   state.sessionHistory = state.sessionHistory.filter(s => s.id !== id)
   if (selectedHistorySessionId.value === id) {
@@ -637,6 +694,24 @@ function installUpdate() {
 // ── Settings ───────────────────────────────────────────────────────────────
 const STORAGE_KEY = 'tli-log-path'
 const activeTab = ref('overview')
+const overlayMode = ref(false)
+const prevBounds = ref(null)
+
+async function enterOverlay() {
+  prevBounds.value = await window.electronAPI?.getWindowBounds()
+  window.electronAPI?.setWindowOptions({ width: 280, height: 120, alwaysOnTop: true, resizable: false, maximizable: false })
+  overlayMode.value = true
+}
+
+function exitOverlay() {
+  overlayMode.value = false
+  const b = prevBounds.value
+  window.electronAPI?.setWindowOptions({
+    width: b?.width ?? 1100, height: b?.height ?? 720,
+    alwaysOnTop: false, resizable: true, maximizable: true
+  })
+}
+
 const logFilePath = ref(localStorage.getItem(STORAGE_KEY) ?? '')
 const now = ref(Date.now())
 const lootPanelMode = ref('map')       // 'map' | 'session' — scope of loot/cost panel
@@ -881,8 +956,26 @@ onUnmounted(() => {
     <!-- Body -->
     <div class="body">
 
+      <!-- Compact overlay mode -->
+      <div v-if="overlayMode" class="overlay-body">
+        <div class="overlay-stats">
+          <div class="overlay-stat">
+            <div class="overlay-label">Profit</div>
+            <div class="overlay-val">{{ formatVal(sessionProfit) }} FE</div>
+          </div>
+          <div class="overlay-stat overlay-stat--clickable" @click="rateMode = rateMode === 'hr' ? 'min' : 'hr'" title="Click to toggle hr/min">
+            <div class="overlay-label">FE/{{ rateMode }} ⇅</div>
+            <div class="overlay-val">{{ formatVal(profitRateMapTime) }}</div>
+          </div>
+        </div>
+        <div class="overlay-times">
+          Map: {{ totalMapsTime }} · Real: {{ realTime }}
+        </div>
+        <button class="overlay-exit-btn" @click="exitOverlay">Exit Overlay</button>
+      </div>
+
       <!-- Sidebar tabs -->
-      <div class="sidebar">
+      <div v-if="!overlayMode" class="sidebar">
         <button
           class="tab-btn"
           :class="{ active: activeTab === 'overview' }"
@@ -916,13 +1009,13 @@ onUnmounted(() => {
       </div>
 
       <!-- Main content -->
-      <div class="main">
+      <div v-if="!overlayMode" class="main">
 
         <!-- Overview tab -->
         <div v-if="activeTab === 'overview'" class="panel">
 
           <!-- Top stats + reset -->
-          <div class="stats-top-row">
+          <div class="stats-top-row" style="position:relative">
             <div class="stats-row">
               <div class="stat-card">
                 <div class="stat-label">Networth</div>
@@ -941,21 +1034,14 @@ onUnmounted(() => {
                 <div class="rate-real-time">{{ formatVal(profitRateRealTime) }} 🔥 real time</div>
               </div>
             </div>
-            <div class="stats-row">
-              <div class="stat-card">
-                <div class="stat-label">Maps Run</div>
-                <div class="stat-value stat-value--sm">{{ mapCount }}</div>
-              </div>
-              <div class="stat-card">
-                <div class="stat-label">Avg / Map</div>
-                <div class="stat-value stat-value--sm">{{ mapCount ? formatVal(avgProfitPerMap) + ' 🔥' : '—' }}</div>
-              </div>
-              <div class="stat-card">
-                <div class="stat-label">Best Map</div>
-                <div class="stat-value stat-value--sm">{{ bestMap ? formatVal(mapProfit(bestMap)) + ' 🔥' : '—' }}</div>
-              </div>
+
+            <div class="session-actions">
+              <button class="btn btn--small" :disabled="!mapCount" @click="exportCurrentSession">
+                {{ exportCopied === 'current' ? 'Copied!' : 'Export' }}
+              </button>
+              <button class="btn btn--small reset-btn" @click="resetSession">Reset Session</button>
+              <button class="btn btn--small overlay-enter-btn" title="Compact overlay" @click="enterOverlay">⧉</button>
             </div>
-            <button class="btn btn--small reset-btn" @click="resetSession">Reset Session</button>
           </div>
 
           <!-- Log status notice -->
@@ -982,6 +1068,19 @@ onUnmounted(() => {
             <div class="timer-item">
               <span class="timer-label">Real Time</span>
               <span class="timer-val">{{ realTime }}</span>
+            </div>
+            <div class="timer-divider"></div>
+            <div class="timer-item">
+              <span class="timer-label">Maps Run</span>
+              <span class="timer-val">{{ mapCount }}</span>
+            </div>
+            <div class="timer-item">
+              <span class="timer-label">Avg / Map</span>
+              <span class="timer-val">{{ mapCount ? formatVal(avgProfitPerMap) + ' 🔥' : '—' }}</span>
+            </div>
+            <div class="timer-item">
+              <span class="timer-label">Best Map</span>
+              <span class="timer-val">{{ bestMap ? formatVal(mapProfit(bestMap)) + ' 🔥' : '—' }}</span>
             </div>
           </div>
 
@@ -1144,6 +1243,7 @@ onUnmounted(() => {
                     {{ fmtDuration(session.endTime - session.startTime) }} played
                   </span>
                 </div>
+                <button class="history-export-btn" @click.stop="exportHistorySession(session)">{{ exportCopied === session.id ? '✓' : '⬆' }}</button>
                 <button class="history-delete-btn" @click.stop="deleteHistorySession(session.id)">✕</button>
               </div>
 
@@ -1338,6 +1438,31 @@ onUnmounted(() => {
 /* Body layout */
 .body { display: flex; flex: 1; overflow: hidden; }
 
+/* ── Compact overlay ── */
+.overlay-body {
+  display: flex; flex-direction: column; flex: 1;
+  padding: 6px 10px 8px; gap: 5px;
+}
+.overlay-stats {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+}
+.overlay-stat {
+  display: flex; flex-direction: column; gap: 1px;
+  background: rgba(255,255,255,0.05); border-radius: 6px; padding: 5px 8px;
+}
+.overlay-stat--clickable { cursor: pointer; }
+.overlay-stat--clickable:hover { background: rgba(255,255,255,0.09); }
+.overlay-label { font-size: 10px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; }
+.overlay-val { font-size: 13px; font-weight: 600; color: #f9fafb; white-space: nowrap; }
+.overlay-times { font-size: 11px; color: #4b5563; padding: 0 2px; }
+.overlay-exit-btn {
+  align-self: flex-end; background: none; border: 1px solid rgba(255,255,255,0.08);
+  color: #4b5563; font-size: 10px; padding: 2px 8px; border-radius: 4px;
+  cursor: pointer; transition: color 0.15s, border-color 0.15s;
+}
+.overlay-exit-btn:hover { color: #d1d5db; border-color: rgba(255,255,255,0.2); }
+.overlay-enter-btn { font-size: 14px; padding: 2px 7px; }
+
 /* Sidebar */
 .sidebar {
   width: 110px;
@@ -1389,7 +1514,8 @@ onUnmounted(() => {
 /* Stats row */
 .stats-top-row { display: flex; align-items: flex-start; gap: 10px; flex-shrink: 0; }
 .stats-top-row .stats-row { flex: 1; }
-.reset-btn { flex-shrink: 0; align-self: flex-start; white-space: nowrap; }
+.session-actions { display: flex; gap: 6px; align-self: flex-start; flex-shrink: 0; }
+.reset-btn { white-space: nowrap; }
 .stats-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .stat-card {
   background: rgba(255,255,255,0.04);
@@ -1438,6 +1564,7 @@ onUnmounted(() => {
 .timer-item { display: flex; flex-direction: column; }
 .timer-label { font-size: 10px; color: #4b5563; text-transform: uppercase; letter-spacing: 0.05em; }
 .timer-val { font-size: 15px; font-weight: 600; color: #d1d5db; font-variant-numeric: tabular-nums; }
+.timer-divider { width: 1px; background: rgba(255,255,255,0.07); margin: 0 4px; align-self: stretch; }
 
 /* Map + loot area */
 .map-loot-area { display: flex; gap: 10px; flex: 1; overflow: hidden; }
@@ -1572,6 +1699,11 @@ onUnmounted(() => {
 .history-session-main { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
 .history-session-date { font-size: 12px; font-weight: 600; color: #d1d5db; }
 .history-session-stats { font-size: 11px; color: #6b7280; }
+.history-export-btn {
+  background: none; border: none; color: #4b5563; cursor: pointer;
+  font-size: 12px; padding: 4px 6px; border-radius: 4px; flex-shrink: 0;
+}
+.history-export-btn:hover { color: #60a5fa; background: rgba(96,165,250,0.1); }
 .history-delete-btn {
   background: none; border: none; color: #4b5563; cursor: pointer;
   font-size: 12px; padding: 4px 6px; border-radius: 4px; flex-shrink: 0;
